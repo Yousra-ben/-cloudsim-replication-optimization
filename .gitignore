@@ -1,0 +1,9 @@
+classes/
+results/*.csv
+!results/.gitkeep
+*.log
+*.tmp
+.idea/
+.DS_Store
+Thumbs.db
+credentials/*.json
