@@ -26,7 +26,9 @@ jobs:
         run: ./build.sh
       
       - name: Execution
-        run: ./run-simulation.sh
+        run: |
+          chmod +x run-simulation.sh
+          ./run-simulation.sh
       
       - name: Sauvegarde resultats
         uses: actions/upload-artifact@v4
