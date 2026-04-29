@@ -1,5 +1,3 @@
-package generationcsv;
-
 import org.cloudbus.cloudsim.*;
 import org.cloudbus.cloudsim.core.CloudSim;
 import java.util.*;
@@ -14,18 +12,18 @@ import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
 import java.util.Locale;
 
-// Imports pour Google Drive API
-import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
-import com.google.api.client.http.FileContent;
-import com.google.api.client.http.javanet.NetHttpTransport;
-import com.google.api.client.json.JsonFactory;
-import com.google.api.client.json.jackson2.JacksonFactory;
-import com.google.api.services.drive.Drive;
-import com.google.api.services.drive.DriveScopes;
-import com.google.api.services.drive.model.File;
-import com.google.api.services.drive.model.FileList;
-import com.google.auth.http.HttpCredentialsAdapter;
-import com.google.auth.oauth2.GoogleCredentials;
+// Imports pour Google Drive API (optionnel - commenté pour GitHub Actions)
+// import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
+// import com.google.api.client.http.FileContent;
+// import com.google.api.client.http.javanet.NetHttpTransport;
+// import com.google.api.client.json.JsonFactory;
+// import com.google.api.client.json.jackson2.JacksonFactory;
+// import com.google.api.services.drive.Drive;
+// import com.google.api.services.drive.DriveScopes;
+// import com.google.api.services.drive.model.File;
+// import com.google.api.services.drive.model.FileList;
+// import com.google.auth.http.HttpCredentialsAdapter;
+// import com.google.auth.oauth2.GoogleCredentials;
 
 public class ReplicaPlacementSimulationOptimized2 {
     private static final long RANDOM_SEED = 12345L;
@@ -40,7 +38,10 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static final long VM_SIZE = 10000;
     private static final String VMM = "Xen";
    
-   private static final String CSV_OUTPUT_DIR = System.getProperty("user.home") + "/results/";
+    // CHEMIN CORRIGÉ POUR GITHUB ACTIONS (Linux) et Windows
+    private static final String CSV_OUTPUT_DIR = 
+        System.getProperty("user.home") + 
+        (System.getProperty("os.name").toLowerCase().contains("win") ? "\\Desktop\\testcodedreplicationcsv\\" : "/results/");
     
     // FICHIERS AVANT DRIFT
     private static final String CSV_USER_ACCESS_BEFORE_PATH = CSV_OUTPUT_DIR + "1_user_access_details_before.csv";
@@ -73,12 +74,7 @@ public class ReplicaPlacementSimulationOptimized2 {
     // RAPPORT FINAL
     private static final String CSV_SIMULATION_SUMMARY_PATH = CSV_OUTPUT_DIR + "19_simulation_summary.csv";
    
-    // Configuration Google Drive
-    private static final String APPLICATION_NAME = "ReplicaPlacementOptimization";
-    private static final JsonFactory JSON_FACTORY = JacksonFactory.getDefaultInstance();
-    private static final String CREDENTIALS_PATH = System.getProperty("user.home") + "\\Desktop\\fichier-doptimisation-a4a7e3145b87.json";
-    private static final String DRIVE_FOLDER_NAME = "Optimisation_Replication_Donnees";
-    private static String driveFolderId = null;
+    // Configuration Google Drive (DESACTIVE par defaut pour GitHub Actions)
     private static boolean googleDriveEnabled = false;
    
     private static final int MAX_FRAGMENT_SIZE = 2000;
@@ -201,134 +197,17 @@ public class ReplicaPlacementSimulationOptimized2 {
         }
     }
 
-    // ==================== GOOGLE DRIVE API METHODS ====================
-    
-    private static void initGoogleDrive() {
-        System.out.println("\n🔐 Initialisation de Google Drive...");
-        
-        java.io.File credFile = new java.io.File(CREDENTIALS_PATH);
-        if (!credFile.exists()) {
-            System.err.println("❌ Fichier credentials non trouvé: " + CREDENTIALS_PATH);
-            System.err.println("📌 Placez votre fichier credentials sur le bureau:");
-            System.err.println("   fichier-doptimisation-a4a7e3145b87.json");
-            System.err.println("\n⚠️ Les fichiers seront sauvegardés localement uniquement.");
-            googleDriveEnabled = false;
-            return;
-        }
-        
-        try {
-            System.setProperty("GOOGLE_APPLICATION_CREDENTIALS", CREDENTIALS_PATH);
-            System.out.println("✓ Fichier credentials trouvé");
-            System.out.println("📁 Dossier Google Drive: " + DRIVE_FOLDER_NAME);
-            googleDriveEnabled = true;
-        } catch (Exception e) {
-            System.err.println("❌ Erreur: " + e.getMessage());
-            googleDriveEnabled = false;
-        }
-    }
-    
-    private static Drive getDriveService() throws Exception {
-        GoogleCredentials credentials = GoogleCredentials.getApplicationDefault()
-            .createScoped(Collections.singletonList(DriveScopes.DRIVE_FILE));
-        final NetHttpTransport HTTP_TRANSPORT = GoogleNetHttpTransport.newTrustedTransport();
-        return new Drive.Builder(HTTP_TRANSPORT, JSON_FACTORY, new HttpCredentialsAdapter(credentials))
-            .setApplicationName(APPLICATION_NAME)
-            .build();
-    }
-    
-    private static String createOrGetDriveFolder(Drive driveService) throws IOException {
-        String pageToken = null;
-        do {
-            FileList result = driveService.files().list()
-                .setQ("mimeType='application/vnd.google-apps.folder' and name='" + DRIVE_FOLDER_NAME + "' and trashed=false")
-                .setSpaces("drive")
-                .setFields("nextPageToken, files(id, name)")
-                .setPageToken(pageToken)
-                .execute();
-            
-            for (File folder : result.getFiles()) {
-                if (folder.getName().equals(DRIVE_FOLDER_NAME)) {
-                    System.out.println("✓ Dossier existant trouvé");
-                    return folder.getId();
-                }
-            }
-            pageToken = result.getNextPageToken();
-        } while (pageToken != null);
-        
-        File fileMetadata = new File();
-        fileMetadata.setName(DRIVE_FOLDER_NAME);
-        fileMetadata.setMimeType("application/vnd.google-apps.folder");
-        
-        File folder = driveService.files().create(fileMetadata)
-            .setFields("id")
-            .execute();
-        
-        System.out.println("✓ Dossier créé: " + DRIVE_FOLDER_NAME);
-        return folder.getId();
-    }
-    
-    private static void uploadFileToDrive(Drive driveService, String filePath, String folderId) throws IOException {
-        java.io.File file = new java.io.File(filePath);
-        if (!file.exists() || file.length() == 0) {
-            return;
-        }
-        
-        File fileMetadata = new File();
-        fileMetadata.setName(file.getName());
-        fileMetadata.setParents(Collections.singletonList(folderId));
-        
-        String mimeType = file.getName().endsWith(".json") ? "application/json" : "text/csv";
-        FileContent mediaContent = new FileContent(mimeType, file);
-        driveService.files().create(fileMetadata, mediaContent)
-            .setFields("id")
-            .execute();
-        
-        System.out.println("  ✓ " + file.getName());
-    }
+    // ==================== GOOGLE DRIVE API METHODS (DESACTIVEES) ====================
     
     private static void uploadToGoogleDrive() {
-        if (!googleDriveEnabled) {
-            System.out.println("\n⚠️ Google Drive désactivé. Fichiers sauvegardés localement.");
-            return;
-        }
-        
-        System.out.println("\n☁️ Upload vers Google Drive...");
-        try {
-            Drive driveService = getDriveService();
-            driveFolderId = createOrGetDriveFolder(driveService);
-            
-            String[][] filesToUpload = {
-                {CSV_OPTIMIZATION_INPUT_PATH, "⭐ Données optimisation"},
-                {CSV_OPTIMIZATION_CONFIG_PATH, "⭐ Configuration optimisation"},
-                {CSV_FILE_INFO_AFTER_DRIFT_PATH, "Fichiers après drift"},
-                {CSV_DRIFT_REPORT_PATH, "Rapport drift"},
-                {CSV_REPLICATION_LOG_PATH, "Journal réplication"},
-                {CSV_FILE_INFO_AFTER_REPLICATION_PATH, "Fichiers après réplication"},
-                {CSV_PLACEMENT_REPORT_PATH, "Rapport placement"},
-                {CSV_SIMULATION_SUMMARY_PATH, "Résumé simulation"}
-            };
-            
-            System.out.println("📤 Upload des fichiers...");
-            int uploaded = 0;
-            for (String[] fileInfo : filesToUpload) {
-                java.io.File f = new java.io.File(fileInfo[0]);
-                if (f.exists() && f.length() > 0) {
-                    uploadFileToDrive(driveService, fileInfo[0], driveFolderId);
-                    uploaded++;
-                }
-            }
-            
-            System.out.println("\n✅ " + uploaded + " fichiers uploadés vers Google Drive");
-            
-        } catch (Exception e) {
-            System.err.println("❌ Erreur upload: " + e.getMessage());
-        }
+        System.out.println("\n⚠️ Google Drive désactivé sur GitHub Actions. Fichiers sauvegardés localement.");
     }
     
     // ==================== MÉTHODES DE GÉNÉRATION CSV ====================
     
     private static void generateUserAccessBeforeCSV(List<User> users) throws IOException {
         Path path = Paths.get(CSV_USER_ACCESS_BEFORE_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("UserID,UserLocation,FileID,AccessType,DatacenterAccessed,DatacenterRegion");
         for (User user : users) {
@@ -347,6 +226,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateDatacenterInfoBeforeCSV(List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_DATACENTER_INFO_BEFORE_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount,VMPerHost");
         for (RegionInfo info : datacenterInfos) {
@@ -363,6 +243,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFileInfoBeforeCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_FILE_INFO_BEFORE_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,Importance,ReplicaCount,ReplicaLocations,UserAccessCount,ReadCount,WriteCount,ReadWriteCount");
         for (ReplicaData fichier : fichiers) {
@@ -389,6 +270,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateVmInfoBeforeCSV(List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_VM_INFO_BEFORE_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("VM_ID,DatacenterID,Region,MIPS,RAM_MB,Bandwidth_Mbps,Storage_MB,StorageFree_MB");
         for (RegionInfo info : datacenterInfos) {
@@ -407,6 +289,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFragmentInfoBeforeCSV() throws IOException {
         Path path = Paths.get(CSV_FRAGMENT_INFO_BEFORE_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FragmentID,FileID,SizeMB,VM_ID,DatacenterID,Region");
         for (Map.Entry<Integer, Map<Integer, List<FragmentMetadata>>> fileEntry : fileCopiesMap.entrySet()) {
@@ -430,6 +313,7 @@ public class ReplicaPlacementSimulationOptimized2 {
                                                    Map<Integer, Integer> originalSizes,
                                                    Map<Integer, Map<Integer, AccessType>> originalAccess) throws IOException {
         Path path = Paths.get(CSV_DRIFT_REPORT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,OriginalSizeMB,NewSizeMB,SizeChangeMB,SizeChangePercentage,OriginalAccessCount,NewAccessCount,AccessChangeCount");
         
@@ -453,6 +337,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateUserAccessDriftLog(List<User> users, List<User> originalUsers) throws IOException {
         Path path = Paths.get(CSV_USER_ACCESS_DRIFT_LOG_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("UserID,UserLocation,FileID,ChangeType,OldAccessType,NewAccessType,Timestamp");
         
@@ -489,6 +374,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateUserAccessAfterDriftCSV(List<User> users) throws IOException {
         Path path = Paths.get(CSV_USER_ACCESS_AFTER_DRIFT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("UserID,UserLocation,FileID,AccessType,DatacenterAccessed,DatacenterRegion");
         for (User user : users) {
@@ -507,6 +393,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateDatacenterInfoAfterDriftCSV(List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_DATACENTER_INFO_AFTER_DRIFT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount,VMPerHost");
         for (RegionInfo info : datacenterInfos) {
@@ -523,6 +410,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFileInfoAfterDriftCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_FILE_INFO_AFTER_DRIFT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,Importance,ReplicaCount,ReplicaLocations,UserAccessCount,ReadCount,WriteCount,ReadWriteCount");
         for (ReplicaData fichier : fichiers) {
@@ -549,6 +437,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFragmentInfoAfterDriftCSV() throws IOException {
         Path path = Paths.get(CSV_FRAGMENT_INFO_AFTER_DRIFT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FragmentID,FileID,SizeMB,VM_ID,DatacenterID,Region");
         for (Map.Entry<Integer, Map<Integer, List<FragmentMetadata>>> fileEntry : fileCopiesMap.entrySet()) {
@@ -571,6 +460,7 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static void generateSystemStateAfterDriftCSV(List<ReplicaData> fichiers, List<User> users,
                                                          List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_SYSTEM_STATE_AFTER_DRIFT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("Timestamp," + System.currentTimeMillis());
         lines.add("TotalFiles," + fichiers.size());
@@ -600,6 +490,7 @@ public class ReplicaPlacementSimulationOptimized2 {
         System.out.println("\n=== GÉNÉRATION DES DONNÉES POUR OPTIMISATION SPEA2/NSGA-II ===");
         
         Path path = Paths.get(CSV_OPTIMIZATION_INPUT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,UserAccessCount,CurrentReplicaCount,CurrentDatacenters,AccessPattern,Importance,PopularityScore,ReadCount,WriteCount");
         
@@ -631,6 +522,7 @@ public class ReplicaPlacementSimulationOptimized2 {
                                                         List<RegionInfo> datacenterInfos,
                                                         Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_OPTIMIZATION_CONFIG_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         
         lines.add("{");
@@ -677,6 +569,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateReplicationLogCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_REPLICATION_LOG_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,PopularityScore,NewReplicasAdded,NewDatacenters,ReplicationStatus");
         for (ReplicaData file : fichiers) {
@@ -700,6 +593,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateDatacenterInfoAfterReplicationCSV(List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_DATACENTER_INFO_AFTER_REPLICATION_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount,VMPerHost");
         for (RegionInfo info : datacenterInfos) {
@@ -716,6 +610,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFileInfoAfterReplicationCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_FILE_INFO_AFTER_REPLICATION_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,Importance,TotalReplicaCount,OriginalReplicas,NewReplicas,AllReplicaLocations,UserAccessCount");
         for (ReplicaData fichier : fichiers) {
@@ -736,6 +631,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generateFragmentInfoAfterReplicationCSV() throws IOException {
         Path path = Paths.get(CSV_FRAGMENT_INFO_AFTER_REPLICATION_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FragmentID,FileID,SizeMB,VM_ID,DatacenterID,Region,IsNewReplica");
         for (Map.Entry<Integer, Map<Integer, List<FragmentMetadata>>> fileEntry : fileCopiesMap.entrySet()) {
@@ -758,6 +654,7 @@ public class ReplicaPlacementSimulationOptimized2 {
 
     private static void generatePlacementReportCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
         Path path = Paths.get(CSV_PLACEMENT_REPORT_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,FileSizeMB,UserAccessCount,OriginalDatacenters,NewDatacenters,TotalDatacenters");
         for (ReplicaData file : fichiers) {
@@ -778,6 +675,7 @@ public class ReplicaPlacementSimulationOptimized2 {
                                                                 List<User> users,
                                                                 List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_SYSTEM_STATE_AFTER_REPLICATION_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("Timestamp," + System.currentTimeMillis());
         lines.add("TotalFiles," + fichiers.size());
@@ -798,6 +696,7 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static void generateSimulationSummaryCSV(List<ReplicaData> fichiers, List<User> users,
                                                       List<RegionInfo> datacenterInfos) throws IOException {
         Path path = Paths.get(CSV_SIMULATION_SUMMARY_PATH);
+        Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("SimulationDate," + new Date());
         lines.add("TotalFiles," + fichiers.size());
@@ -1101,9 +1000,6 @@ public class ReplicaPlacementSimulationOptimized2 {
             System.out.println("Dossier local: " + CSV_OUTPUT_DIR);
             System.out.println();
             
-            // Initialisation Google Drive
-            initGoogleDrive();
-            
             Random seededRandom = new Random(RANDOM_SEED);
             CloudSim.init(1, Calendar.getInstance(), false);
 
@@ -1237,7 +1133,7 @@ public class ReplicaPlacementSimulationOptimized2 {
             generateSystemStateAfterReplicationCSV(fichiers, users, datacenterInfos);
             generateSimulationSummaryCSV(fichiers, users, datacenterInfos);
             
-            // ==================== PHASE 5: UPLOAD VERS GOOGLE DRIVE ====================
+            // ==================== PHASE 5: UPLOAD ====================
             uploadToGoogleDrive();
             
             // ==================== RAPPORT FINAL ====================
@@ -1245,13 +1141,6 @@ public class ReplicaPlacementSimulationOptimized2 {
             System.out.println("✅ SIMULATION TERMINÉE AVEC SUCCÈS");
             System.out.println("=========================================");
             System.out.println("📁 Dossier local: " + CSV_OUTPUT_DIR);
-            if (googleDriveEnabled) {
-                System.out.println("☁️ Fichiers exportés vers Google Drive");
-                System.out.println("📁 Dossier créé: " + DRIVE_FOLDER_NAME);
-            } else {
-                System.out.println("⚠️ Google Drive non configuré");
-                System.out.println("📌 Placez fichier-doptimisation-a4a7e3145b87.json sur le bureau");
-            }
             System.out.println("=========================================");
 
             CloudSim.stopSimulation();
