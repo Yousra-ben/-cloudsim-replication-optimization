@@ -13,39 +13,22 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Récupération du code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       
-      - name: Installation Java
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '11'
       
-      - name: Configuration Google Drive
+      - run: chmod +x build.sh run-simulation.sh
+      
+      - run: ./build.sh
+      
+      - run: ./run-simulation.sh
         env:
-          DRIVE_CREDENTIALS: ${{ secrets.DRIVE_CREDENTIALS }}
-          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
-        run: |
-          # Sauvegarder les credentials
-          echo "$DRIVE_CREDENTIALS" > /tmp/credentials.json
-          echo "✅ Credentials configurés"
-          echo "📁 Folder ID: $DRIVE_FOLDER_ID"
+          DRIFT_ID: ${{ github.event.inputs.drift_id }}
       
-      - name: Exécution simulation
-        run: |
-          chmod +x run-simulation.sh
-          ./run-simulation.sh
-      
-      - name: Upload résultats vers Google Drive
-        uses: lychee-actions/lychee-upload@v1
+      - uses: actions/upload-artifact@v4
         with:
-          target: results/
-          google_credentials: ${{ secrets.DRIVE_CREDENTIALS }}
-          folder_id: ${{ secrets.DRIVE_FOLDER_ID }}
-      
-      - name: Sauvegarde artefacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: simulation-results-drift-${{ github.event.inputs.drift_id }}
+          name: results-drift-${{ github.event.inputs.drift_id }}
           path: results/
