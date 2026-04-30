@@ -1,4 +1,15 @@
 #!/bin/bash
+echo "Test simple..."
+
+# Nettoyer
+rm -rf classes
+mkdir -p classes
+
+# Compiler le test
+javac -cp "lib/*" -d classes src/Test.java
+
+# Exécuter
+java -cp "lib/*:classes" Test#!/bin/bash
 echo "🚀 Lancement de la simulation CloudSim..."
 
 # Afficher le contenu des dossiers pour debug
