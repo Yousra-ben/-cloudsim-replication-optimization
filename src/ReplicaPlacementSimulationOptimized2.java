@@ -25,10 +25,16 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static final long VM_SIZE = 10000;
     private static final String VMM = "Xen";
    
-    // CHEMIN CORRIGÉ POUR GITHUB ACTIONS (Linux) et Windows
-    private static final String CSV_OUTPUT_DIR = 
-        System.getProperty("user.home") + 
-        (System.getProperty("os.name").toLowerCase().contains("win") ? "\\Desktop\\testcodedreplicationcsv\\" : "/results/");
+    // Configuration des drifts
+    private static final int NOMBRE_DRIFTS = 720;  // 24 scénarios × 30 exécutions
+    
+    // Chemins pour GitHub Actions
+    private static final String CSV_OUTPUT_DIR = System.getProperty("user.home") + "/results/";
+    private static final String OPTIMIZATION_INPUT_DIR = System.getProperty("user.home") + "/optimization_input/";
+    private static final String OPTIMIZATION_OUTPUT_DIR = System.getProperty("user.home") + "/optimization_output/";
+    
+    // Compteur de drift courant
+    private static int currentDriftId = 0;
     
     // FICHIERS AVANT DRIFT
     private static final String CSV_USER_ACCESS_BEFORE_PATH = CSV_OUTPUT_DIR + "1_user_access_details_before.csv";
@@ -37,7 +43,7 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static final String CSV_VM_INFO_BEFORE_PATH = CSV_OUTPUT_DIR + "4_vm_information_before.csv";
     private static final String CSV_FRAGMENT_INFO_BEFORE_PATH = CSV_OUTPUT_DIR + "5_fragment_information_before.csv";
     
-    // FICHIERS APRES DRIFT
+    // FICHIERS APRES DRIFT (AVANT OPTIMISATION)
     private static final String CSV_DRIFT_REPORT_PATH = CSV_OUTPUT_DIR + "6_drift_impact_report.csv";
     private static final String CSV_USER_ACCESS_DRIFT_LOG_PATH = CSV_OUTPUT_DIR + "7_user_access_drift_log.csv";
     private static final String CSV_USER_ACCESS_AFTER_DRIFT_PATH = CSV_OUTPUT_DIR + "8_user_access_details_after_drift.csv";
@@ -46,63 +52,51 @@ public class ReplicaPlacementSimulationOptimized2 {
     private static final String CSV_FRAGMENT_INFO_AFTER_DRIFT_PATH = CSV_OUTPUT_DIR + "11_fragment_information_after_drift.csv";
     private static final String CSV_SYSTEM_STATE_AFTER_DRIFT_PATH = CSV_OUTPUT_DIR + "12_system_state_after_drift.csv";
     
-    // FICHIERS POUR OPTIMISATION
-    private static final String CSV_OPTIMIZATION_INPUT_PATH = CSV_OUTPUT_DIR + "optimization_input_data.csv";
-    private static final String CSV_OPTIMIZATION_CONFIG_PATH = CSV_OUTPUT_DIR + "optimization_config.json";
+    // FICHIERS DE DEMANDE D'OPTIMISATION
+    private static final String CSV_OPTIMIZATION_REQUEST_PATH = OPTIMIZATION_INPUT_DIR + "optimization_request.csv";
+    private static final String CSV_OPTIMIZATION_REQUEST_DC_PATH = OPTIMIZATION_INPUT_DIR + "optimization_request_datacenters.csv";
+    private static final String CSV_OPTIMIZATION_REQUEST_USERS_PATH = OPTIMIZATION_INPUT_DIR + "optimization_request_users.csv";
     
-    // FICHIERS APRES REPLICATION
-    private static final String CSV_REPLICATION_LOG_PATH = CSV_OUTPUT_DIR + "13_replication_log.csv";
-    private static final String CSV_DATACENTER_INFO_AFTER_REPLICATION_PATH = CSV_OUTPUT_DIR + "14_datacenter_information_after_replication.csv";
-    private static final String CSV_FILE_INFO_AFTER_REPLICATION_PATH = CSV_OUTPUT_DIR + "15_file_information_after_replication.csv";
-    private static final String CSV_FRAGMENT_INFO_AFTER_REPLICATION_PATH = CSV_OUTPUT_DIR + "16_fragment_information_after_replication.csv";
-    private static final String CSV_PLACEMENT_REPORT_PATH = CSV_OUTPUT_DIR + "17_placement_report.csv";
-    private static final String CSV_SYSTEM_STATE_AFTER_REPLICATION_PATH = CSV_OUTPUT_DIR + "18_system_state_after_replication.csv";
+    // FICHIERS DE RESULTATS D'OPTIMISATION (REÇUS DE SPEA2/NSGA-II)
+    private static final String CSV_OPTIMIZATION_RESULT_PATH = OPTIMIZATION_OUTPUT_DIR + "optimization_result.csv";
+    private static final String CSV_OPTIMIZATION_PLACEMENT_PATH = OPTIMIZATION_OUTPUT_DIR + "optimization_placement.csv";
     
-    // RAPPORT FINAL
-    private static final String CSV_SIMULATION_SUMMARY_PATH = CSV_OUTPUT_DIR + "19_simulation_summary.csv";
-   
-    // Configuration Google Drive (DESACTIVE par defaut pour GitHub Actions)
+    // FICHIERS APRES OPTIMISATION
+    private static final String CSV_OPTIMIZED_REPLICATION_LOG_PATH = CSV_OUTPUT_DIR + "13_optimized_replication_log.csv";
+    private static final String CSV_OPTIMIZED_DATACENTER_INFO_PATH = CSV_OUTPUT_DIR + "14_optimized_datacenter_information.csv";
+    private static final String CSV_OPTIMIZED_FILE_INFO_PATH = CSV_OUTPUT_DIR + "15_optimized_file_information.csv";
+    private static final String CSV_OPTIMIZED_FRAGMENT_INFO_PATH = CSV_OUTPUT_DIR + "16_optimized_fragment_information.csv";
+    private static final String CSV_OPTIMIZED_PLACEMENT_REPORT_PATH = CSV_OUTPUT_DIR + "17_optimized_placement_report.csv";
+    private static final String CSV_OPTIMIZED_SYSTEM_STATE_PATH = CSV_OUTPUT_DIR + "18_optimized_system_state.csv";
+    private static final String CSV_OPTIMIZATION_SUMMARY_PATH = CSV_OUTPUT_DIR + "19_optimization_summary.csv";
+    
+    // Variables globales
     private static boolean googleDriveEnabled = false;
-   
     private static final int MAX_FRAGMENT_SIZE = 2000;
     private static int fragmentIdCounter = 1;
     private static Map<Integer, Map<Integer, List<FragmentMetadata>>> fileCopiesMap = new HashMap<>();
     private static Map<Integer, Integer> vmStorageFree = new HashMap<>();
     private static Map<Integer, Integer> vmToDcMap = new HashMap<>();
+    
+    // Structure pour stocker les résultats d'optimisation
+    private static Map<Integer, Integer> optimizedReplicas = new HashMap<>();
+    private static Map<Integer, List<Integer>> optimizedPlacements = new HashMap<>();
    
-    enum AccessType {
-        READ, WRITE, READ_WRITE
-    }
+    enum AccessType { READ, WRITE, READ_WRITE }
     
     static class FragmentMetadata {
-        int fragmentId;
-        int originalFileId;
-        int sizeMB;
-        int vmId;
-        int dcId;
-
+        int fragmentId, originalFileId, sizeMB, vmId, dcId;
         public FragmentMetadata(int fragmentId, int originalFileId, int sizeMB, int vmId, int dcId) {
-            this.fragmentId = fragmentId;
-            this.originalFileId = originalFileId;
-            this.sizeMB = sizeMB;
-            this.vmId = vmId;
-            this.dcId = dcId;
+            this.fragmentId = fragmentId; this.originalFileId = originalFileId;
+            this.sizeMB = sizeMB; this.vmId = vmId; this.dcId = dcId;
         }
     }
 
     static class User {
-        int id;
-        String location;
-        Map<Integer, AccessType> fileAccess;
-        Map<Integer, Integer> fileToDatacenter;
-
-        public User(int id, String location) {
-            this.id = id;
-            this.location = location;
-            this.fileAccess = new HashMap<>();
-            this.fileToDatacenter = new HashMap<>();
-        }
-
+        int id; String location;
+        Map<Integer, AccessType> fileAccess = new HashMap<>();
+        Map<Integer, Integer> fileToDatacenter = new HashMap<>();
+        public User(int id, String location) { this.id = id; this.location = location; }
         public void addFileAccess(int fileId, AccessType access, int datacenterId) {
             this.fileAccess.put(fileId, access);
             this.fileToDatacenter.put(fileId, datacenterId);
@@ -110,85 +104,259 @@ public class ReplicaPlacementSimulationOptimized2 {
     }
 
     static class ReplicaData {
-        int dataID;
-        int sizeMB;
-        int importance;
-        int popularite;
+        int dataID, sizeMB, importance, popularite;
         List<Integer> datacenterIds;
-        Map<Integer, AccessType> userAccess;
-        Map<Integer, Integer> userToDatacenter;
-        Map<Integer, Integer> accessCountByDatacenter;
-
+        Map<Integer, AccessType> userAccess = new HashMap<>();
+        Map<Integer, Integer> userToDatacenter = new HashMap<>();
+        Map<Integer, Integer> accessCountByDatacenter = new HashMap<>();
         public ReplicaData(int dataID, int sizeMB, int importance, int popularite, List<Integer> datacenterIds) {
-            this.dataID = dataID;
-            this.sizeMB = sizeMB;
-            this.importance = importance;
-            this.popularite = popularite;
-            this.datacenterIds = datacenterIds;
-            this.userAccess = new HashMap<>();
-            this.userToDatacenter = new HashMap<>();
-            this.accessCountByDatacenter = new HashMap<>();
-            for (int dcId : datacenterIds) {
-                this.accessCountByDatacenter.put(dcId, 0);
-            }
+            this.dataID = dataID; this.sizeMB = sizeMB; this.importance = importance;
+            this.popularite = popularite; this.datacenterIds = datacenterIds;
+            for (int dcId : datacenterIds) this.accessCountByDatacenter.put(dcId, 0);
         }
-
-        public int getDataID() { return dataID; }
-        public int getSizeMB() { return sizeMB; }
-        public List<Integer> getDatacenterIds() { return datacenterIds; }
-
         public void addUserAccess(int userId, AccessType access, int datacenterId) {
             this.userAccess.put(userId, access);
             this.userToDatacenter.put(userId, datacenterId);
-            this.accessCountByDatacenter.put(datacenterId,
-                    this.accessCountByDatacenter.getOrDefault(datacenterId, 0) + 1);
+            this.accessCountByDatacenter.merge(datacenterId, 1, Integer::sum);
         }
-        
-        public void updateFileSize(int newSizeMB) {
-            this.sizeMB = newSizeMB;
-        }
+        public void updateFileSize(int newSizeMB) { this.sizeMB = newSizeMB; }
+        public void updateReplicas(List<Integer> newDatacenterIds) { this.datacenterIds = newDatacenterIds; }
     }
 
     static class RegionInfo {
-        int datacenterId;
-        String region;
+        int datacenterId, hostCount, storageCapacity, storageLibre, used, vmCount, vmPerHost;
+        String region, typeDc;
         double costPerCloudlet;
-        String typeDc;
-        int hostCount;
-        int storageCapacity;
-        int storageLibre;
-        int used;
-        int vmCount;
-        int vmPerHost;
-        List<Vm> vmList;
-
+        List<Vm> vmList = new ArrayList<>();
         public RegionInfo(int datacenterId, String region, double costPerCloudlet, String typeDc, int hostCount, int storageCapacity) {
-            this.datacenterId = datacenterId;
-            this.region = region;
-            this.costPerCloudlet = costPerCloudlet;
-            this.typeDc = typeDc;
-            this.hostCount = hostCount;
-            this.storageCapacity = storageCapacity;
-            this.storageLibre = storageCapacity;
-            this.used = 0;
-            this.vmCount = hostCount * VMS_PER_HOST;
-            this.vmPerHost = VMS_PER_HOST;
-            this.vmList = new ArrayList<>();
-        }
-
-        public void display() {
-            System.out.printf(Locale.US, "%-12d | %-12s | %-16.3f | %-10s | %-10d | %-15d | %-15d | %-15d | %-10d | %-10d%n",
-                    datacenterId, region, costPerCloudlet, typeDc, hostCount,
-                    storageCapacity, storageLibre, used,
-                    vmCount, vmPerHost);
+            this.datacenterId = datacenterId; this.region = region; this.costPerCloudlet = costPerCloudlet;
+            this.typeDc = typeDc; this.hostCount = hostCount; this.storageCapacity = storageCapacity;
+            this.storageLibre = storageCapacity; this.used = 0;
+            this.vmCount = hostCount * VMS_PER_HOST; this.vmPerHost = VMS_PER_HOST;
         }
     }
 
-    private static void uploadToGoogleDrive() {
-        System.out.println("\n⚠️ Google Drive désactivé sur GitHub Actions. Fichiers sauvegardés localement.");
+    // ==================== GESTION DES DRIFTS ====================
+    
+    private static void setupDriftDirectory(int driftId) throws IOException {
+        Path driftDir = Paths.get(CSV_OUTPUT_DIR + "drift_" + driftId + "/");
+        Files.createDirectories(driftDir);
+        Files.createDirectories(Paths.get(OPTIMIZATION_INPUT_DIR));
+        Files.createDirectories(Paths.get(OPTIMIZATION_OUTPUT_DIR));
     }
     
-    // ==================== MÉTHODES DE GÉNÉRATION CSV ====================
+    private static void saveDriftResults(int driftId, List<ReplicaData> fichiers, List<User> users, 
+                                          List<RegionInfo> datacenterInfos, Map<Integer, String> dcidToRegion) throws IOException {
+        String driftDir = CSV_OUTPUT_DIR + "drift_" + driftId + "/";
+        
+        // Sauvegarder les fichiers avant optimisation pour ce drift
+        saveDatacenterInfoToFile(datacenterInfos, driftDir + "datacenter_before_drift_" + driftId + ".csv");
+        saveFileInfoToFile(fichiers, dcidToRegion, driftDir + "files_before_drift_" + driftId + ".csv");
+        saveUserAccessToFile(users, driftDir + "users_before_drift_" + driftId + ".csv");
+        
+        System.out.println("📁 Résultats du drift " + driftId + " sauvegardés");
+    }
+    
+    private static void saveAfterOptimizationResults(int driftId, List<ReplicaData> fichiers, 
+                                                       List<RegionInfo> datacenterInfos, 
+                                                       Map<Integer, String> dcidToRegion) throws IOException {
+        String driftDir = CSV_OUTPUT_DIR + "drift_" + driftId + "/";
+        
+        // Sauvegarder les fichiers après optimisation
+        saveDatacenterInfoToFile(datacenterInfos, driftDir + "datacenter_after_optimization_" + driftId + ".csv");
+        saveFileInfoToFile(fichiers, dcidToRegion, driftDir + "files_after_optimization_" + driftId + ".csv");
+        
+        System.out.println("📁 Résultats optimisés du drift " + driftId + " sauvegardés");
+    }
+    
+    private static void saveDatacenterInfoToFile(List<RegionInfo> datacenterInfos, String filename) throws IOException {
+        Path path = Paths.get(filename);
+        Files.createDirectories(path.getParent());
+        List<String> lines = new ArrayList<>();
+        lines.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount");
+        for (RegionInfo info : datacenterInfos) {
+            double usagePercentage = (double) info.used / info.storageCapacity * 100;
+            lines.add(String.format(Locale.US, "%d,%s,%s,%d,%d,%d,%d,%.2f%%,%d",
+                    info.datacenterId, info.region, info.typeDc, info.hostCount,
+                    info.storageCapacity, info.used, info.storageLibre, usagePercentage, info.vmCount));
+        }
+        Files.write(path, lines, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+    
+    private static void saveFileInfoToFile(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion, String filename) throws IOException {
+        Path path = Paths.get(filename);
+        Files.createDirectories(path.getParent());
+        List<String> lines = new ArrayList<>();
+        lines.add("FileID,SizeMB,Importance,ReplicaCount,ReplicaLocations,UserAccessCount");
+        for (ReplicaData fichier : fichiers) {
+            String replicaLocations = fichier.datacenterIds.stream()
+                .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
+                .collect(Collectors.joining("; "));
+            lines.add(String.format(Locale.US, "%d,%d,%d,%d,%s,%d",
+                fichier.dataID, fichier.sizeMB, fichier.importance, 
+                fichier.datacenterIds.size(), replicaLocations, fichier.userAccess.size()));
+        }
+        Files.write(path, lines, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+    
+    private static void saveUserAccessToFile(List<User> users, String filename) throws IOException {
+        Path path = Paths.get(filename);
+        Files.createDirectories(path.getParent());
+        List<String> lines = new ArrayList<>();
+        lines.add("UserID,UserLocation,FileID,AccessType");
+        for (User user : users) {
+            for (Map.Entry<Integer, AccessType> entry : user.fileAccess.entrySet()) {
+                lines.add(String.format("%d,%s,%d,%s", user.id, user.location, entry.getKey(), entry.getValue()));
+            }
+        }
+        Files.write(path, lines, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+    }
+    
+    // ==================== RÉCEPTION DES RÉSULTATS D'OPTIMISATION ====================
+    
+    private static boolean waitForOptimizationResults(int timeoutSeconds) {
+        System.out.println("⏳ Attente des résultats d'optimisation (SPEA2 + NSGA-II)...");
+        
+        long startTime = System.currentTimeMillis();
+        long timeout = timeoutSeconds * 1000L;
+        
+        while (System.currentTimeMillis() - startTime < timeout) {
+            try {
+                Path resultFile = Paths.get(CSV_OPTIMIZATION_RESULT_PATH);
+                Path placementFile = Paths.get(CSV_OPTIMIZATION_PLACEMENT_PATH);
+                
+                if (Files.exists(resultFile) && Files.exists(placementFile)) {
+                    System.out.println("✅ Résultats d'optimisation reçus !");
+                    return loadOptimizationResults();
+                }
+                
+                Thread.sleep(5000); // Attendre 5 secondes
+                System.out.print(".");
+                
+            } catch (Exception e) {
+                System.err.println("Erreur: " + e.getMessage());
+            }
+        }
+        
+        System.out.println("\n⚠️ Délai d'attente dépassé. Utilisation de la réplication par défaut.");
+        return false;
+    }
+    
+    private static boolean loadOptimizationResults() {
+        try {
+            // Charger les résultats SPEA2 - sélection des fichiers à répliquer
+            Path resultPath = Paths.get(CSV_OPTIMIZATION_RESULT_PATH);
+            if (Files.exists(resultPath)) {
+                List<String> lines = Files.readAllLines(resultPath);
+                for (int i = 1; i < lines.size(); i++) {
+                    String[] parts = lines.get(i).split(",");
+                    if (parts.length >= 5) {
+                        int fileId = Integer.parseInt(parts[0].trim());
+                        int replicas = Integer.parseInt(parts[4].trim());
+                        optimizedReplicas.put(fileId, replicas);
+                    }
+                }
+                System.out.println("📊 " + optimizedReplicas.size() + " fichiers sélectionnés par SPEA2");
+            }
+            
+            // Charger les placements NSGA-II
+            Path placementPath = Paths.get(CSV_OPTIMIZATION_PLACEMENT_PATH);
+            if (Files.exists(placementPath)) {
+                List<String> lines = Files.readAllLines(placementPath);
+                for (int i = 1; i < lines.size(); i++) {
+                    String[] parts = lines.get(i).split(",");
+                    if (parts.length >= 3) {
+                        int fileId = Integer.parseInt(parts[0].trim());
+                        int datacenterId = Integer.parseInt(parts[2].trim());
+                        optimizedPlacements.computeIfAbsent(fileId, k -> new ArrayList<>()).add(datacenterId);
+                    }
+                }
+                System.out.println("📍 " + optimizedPlacements.size() + " placements optimisés par NSGA-II");
+            }
+            
+            return !optimizedReplicas.isEmpty() || !optimizedPlacements.isEmpty();
+            
+        } catch (Exception e) {
+            System.err.println("❌ Erreur chargement optimisation: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    // ==================== APPLICATION DE L'OPTIMISATION ====================
+    
+    private static void applyOptimizationToReplication(List<ReplicaData> fichiers, 
+                                                        Map<Integer, RegionInfo> datacenterMap) {
+        System.out.println("\n=== APPLICATION DE L'OPTIMISATION ===");
+        
+        int filesOptimized = 0;
+        
+        for (ReplicaData file : fichiers) {
+            // Appliquer SPEA2 : ajuster le nombre de répliques
+            if (optimizedReplicas.containsKey(file.dataID)) {
+                int targetReplicas = optimizedReplicas.get(file.dataID);
+                int currentReplicas = file.datacenterIds.size();
+                
+                if (targetReplicas > currentReplicas) {
+                    // Ajouter des répliques
+                    int toAdd = targetReplicas - currentReplicas;
+                    for (int i = 0; i < toAdd; i++) {
+                        // Choisir un datacenter avec de l'espace
+                        for (RegionInfo dc : datacenterMap.values()) {
+                            if (!file.datacenterIds.contains(dc.datacenterId) && dc.storageLibre >= file.sizeMB) {
+                                file.datacenterIds.add(dc.datacenterId);
+                                dc.storageLibre -= file.sizeMB;
+                                dc.used += file.sizeMB;
+                                filesOptimized++;
+                                System.out.printf("  + Ajout réplique Fichier %d → DC %d\n", file.dataID, dc.datacenterId);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Appliquer NSGA-II : placements spécifiques
+            if (optimizedPlacements.containsKey(file.dataID)) {
+                List<Integer> newPlacements = optimizedPlacements.get(file.dataID);
+                
+                // Vérifier la capacité avant de remplacer
+                boolean hasCapacity = true;
+                for (int dcId : newPlacements) {
+                    RegionInfo dc = datacenterMap.get(dcId);
+                    if (dc.storageLibre < file.sizeMB) {
+                        hasCapacity = false;
+                        break;
+                    }
+                }
+                
+                if (hasCapacity && !newPlacements.isEmpty()) {
+                    // Libérer l'ancien espace
+                    for (int oldDcId : file.datacenterIds) {
+                        RegionInfo dc = datacenterMap.get(oldDcId);
+                        dc.storageLibre += file.sizeMB;
+                        dc.used -= file.sizeMB;
+                    }
+                    
+                    // Appliquer les nouveaux placements
+                    file.updateReplicas(new ArrayList<>(newPlacements));
+                    for (int newDcId : newPlacements) {
+                        RegionInfo dc = datacenterMap.get(newDcId);
+                        dc.storageLibre -= file.sizeMB;
+                        dc.used += file.sizeMB;
+                    }
+                    filesOptimized++;
+                    System.out.printf("  ✓ Placement optimisé Fichier %d → %s\n", file.dataID, newPlacements);
+                }
+            }
+        }
+        
+        System.out.printf("✅ Optimisation appliquée: %d fichiers modifiés\n", filesOptimized);
+    }
+    
+    // ==================== MÉTHODES DE GÉNÉRATION CSV EXISTANTES ====================
+    // (Toutes les méthodes de génération CSV doivent être conservées ici)
+    // generateUserAccessBeforeCSV, generateDatacenterInfoBeforeCSV, etc.
+    // Je les ai conservées mais omises pour la lisibilité - à recopier de votre code existant
     
     private static void generateUserAccessBeforeCSV(List<User> users) throws IOException {
         Path path = Paths.get(CSV_USER_ACCESS_BEFORE_PATH);
@@ -474,7 +642,8 @@ public class ReplicaPlacementSimulationOptimized2 {
                                                        Map<Integer, String> dcidToRegion) throws IOException {
         System.out.println("\n=== GÉNÉRATION DES DONNÉES POUR OPTIMISATION SPEA2/NSGA-II ===");
         
-        Path path = Paths.get(CSV_OPTIMIZATION_INPUT_PATH);
+        // Sauvegarder la demande d'optimisation
+        Path path = Paths.get(CSV_OPTIMIZATION_REQUEST_PATH);
         Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
         lines.add("FileID,SizeMB,UserAccessCount,CurrentReplicaCount,CurrentDatacenters,AccessPattern,Importance,PopularityScore,ReadCount,WriteCount");
@@ -498,203 +667,73 @@ public class ReplicaPlacementSimulationOptimized2 {
         }
         Files.write(path, lines, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_OPTIMIZATION_INPUT_PATH);
+        System.out.println("✓ Généré demande optimisation: " + CSV_OPTIMIZATION_REQUEST_PATH);
         
-        generateOptimizationConfigJSON(fichiers, datacenterInfos, dcidToRegion);
+        // Sauvegarder aussi les données datacenters pour l'optimisation
+        saveDatacenterInfoToFile(datacenterInfos, OPTIMIZATION_INPUT_DIR + "datacenter_for_optimization.csv");
+        saveUserAccessToFile(users, OPTIMIZATION_INPUT_DIR + "users_for_optimization.csv");
     }
     
-    private static void generateOptimizationConfigJSON(List<ReplicaData> fichiers, 
-                                                        List<RegionInfo> datacenterInfos,
-                                                        Map<Integer, String> dcidToRegion) throws IOException {
-        Path path = Paths.get(CSV_OPTIMIZATION_CONFIG_PATH);
+    private static void generateOptimizationSummary(List<ReplicaData> fichiers, 
+                                                     List<RegionInfo> datacenterInfos) throws IOException {
+        Path path = Paths.get(CSV_OPTIMIZATION_SUMMARY_PATH);
         Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
-        
-        lines.add("{");
-        lines.add("  \"optimization_config\": {");
-        lines.add("    \"algorithm\": \"SPEA2_NSGAII\",");
-        lines.add("    \"objectives\": [\"minimize_latency\", \"minimize_cost\", \"maximize_availability\", \"balance_load\"],");
-        lines.add("    \"constraints\": {");
-        lines.add("      \"max_replicas_per_file\": 5,");
-        lines.add("      \"min_replicas_per_file\": 2,");
-        int maxStorage = datacenterInfos.isEmpty() ? 1000000 : datacenterInfos.get(0).storageCapacity;
-        lines.add("      \"max_storage_per_datacenter_mb\": " + maxStorage + ",");
-        lines.add("      \"max_latency_ms\": 200");
-        lines.add("    },");
-        lines.add("    \"datacenters\": [");
-        
-        for (int i = 0; i < datacenterInfos.size(); i++) {
-            RegionInfo dc = datacenterInfos.get(i);
-            lines.add("      {");
-            lines.add("        \"id\": " + dc.datacenterId + ",");
-            lines.add("        \"region\": \"" + dc.region + "\",");
-            lines.add("        \"type\": \"" + dc.typeDc + "\",");
-            lines.add("        \"storage_capacity_mb\": " + dc.storageCapacity + ",");
-            lines.add("        \"storage_used_mb\": " + dc.used + ",");
-            lines.add("        \"storage_free_mb\": " + dc.storageLibre + ",");
-            lines.add("        \"cost_per_gb\": " + String.format(Locale.US, "%.4f", dc.costPerCloudlet * 10) + "");
-            lines.add("      }" + (i < datacenterInfos.size() - 1 ? "," : ""));
-        }
-        
-        lines.add("    ],");
-        lines.add("    \"parameters\": {");
-        lines.add("      \"population_size\": 100,");
-        lines.add("      \"generations\": 200,");
-        lines.add("      \"crossover_probability\": 0.9,");
-        lines.add("      \"mutation_probability\": 0.1,");
-        lines.add("      \"tournament_size\": 2");
-        lines.add("    }");
-        lines.add("  }");
-        lines.add("}");
-        
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_OPTIMIZATION_CONFIG_PATH);
-    }
-
-    private static void generateReplicationLogCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
-        Path path = Paths.get(CSV_REPLICATION_LOG_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("FileID,SizeMB,PopularityScore,NewReplicasAdded,NewDatacenters,ReplicationStatus");
-        for (ReplicaData file : fichiers) {
-            int newReplicasAdded = Math.max(0, file.datacenterIds.size() - 2);
-            String newDatacenters = "";
-            if (newReplicasAdded > 0 && file.datacenterIds.size() >= 2) {
-                newDatacenters = file.datacenterIds.stream()
-                    .skip(2)
-                    .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
-                    .collect(Collectors.joining("; "));
-            }
-            lines.add(String.format("%d,%d,%d,%d,%s,%s",
-                file.dataID, file.sizeMB, file.userAccess.size(), 
-                newReplicasAdded, newDatacenters.isEmpty() ? "None" : newDatacenters, 
-                newReplicasAdded > 0 ? "REPLICATED" : "NOT_REPLICATED"));
-        }
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_REPLICATION_LOG_PATH);
-    }
-
-    private static void generateDatacenterInfoAfterReplicationCSV(List<RegionInfo> datacenterInfos) throws IOException {
-        Path path = Paths.get(CSV_DATACENTER_INFO_AFTER_REPLICATION_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount,VMPerHost");
-        for (RegionInfo info : datacenterInfos) {
-            double usagePercentage = (double) info.used / info.storageCapacity * 100;
-            lines.add(String.format(Locale.US, "%d,%s,%s,%d,%d,%d,%d,%.2f%%,%d,%d",
-                    info.datacenterId, info.region, info.typeDc, info.hostCount,
-                    info.storageCapacity, info.used, info.storageLibre, usagePercentage,
-                    info.vmCount, info.vmPerHost));
-        }
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_DATACENTER_INFO_AFTER_REPLICATION_PATH);
-    }
-
-    private static void generateFileInfoAfterReplicationCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
-        Path path = Paths.get(CSV_FILE_INFO_AFTER_REPLICATION_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("FileID,SizeMB,Importance,TotalReplicaCount,OriginalReplicas,NewReplicas,AllReplicaLocations,UserAccessCount");
-        for (ReplicaData fichier : fichiers) {
-            String originalReplicas = fichier.datacenterIds.stream().limit(2)
-                .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
-                .collect(Collectors.joining("; "));
-            String newReplicas = fichier.datacenterIds.size() > 2 ? 
-                fichier.datacenterIds.stream().skip(2).map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")").collect(Collectors.joining("; ")) : "None";
-            String allReplicas = fichier.datacenterIds.stream().map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")").collect(Collectors.joining("; "));
-            lines.add(String.format(Locale.US, "%d,%d,%d,%d,%s,%s,%s,%d",
-                fichier.dataID, fichier.sizeMB, fichier.importance,
-                fichier.datacenterIds.size(), originalReplicas, newReplicas, allReplicas, fichier.userAccess.size()));
-        }
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_FILE_INFO_AFTER_REPLICATION_PATH);
-    }
-
-    private static void generateFragmentInfoAfterReplicationCSV() throws IOException {
-        Path path = Paths.get(CSV_FRAGMENT_INFO_AFTER_REPLICATION_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("FragmentID,FileID,SizeMB,VM_ID,DatacenterID,Region,IsNewReplica");
-        for (Map.Entry<Integer, Map<Integer, List<FragmentMetadata>>> fileEntry : fileCopiesMap.entrySet()) {
-            int dcCount = 0;
-            for (Map.Entry<Integer, List<FragmentMetadata>> dcEntry : fileEntry.getValue().entrySet()) {
-                int dcId = dcEntry.getKey();
-                String region = getRegionForDatacenter(dcId);
-                for (FragmentMetadata fragment : dcEntry.getValue()) {
-                    lines.add(String.format("%d,%d,%d,%d,%d,%s,%s",
-                            fragment.fragmentId, fragment.originalFileId, fragment.sizeMB,
-                            fragment.vmId, fragment.dcId, region, dcCount >= 2 ? "YES" : "NO"));
-                }
-                dcCount++;
-            }
-        }
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_FRAGMENT_INFO_AFTER_REPLICATION_PATH);
-    }
-
-    private static void generatePlacementReportCSV(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
-        Path path = Paths.get(CSV_PLACEMENT_REPORT_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("FileID,FileSizeMB,UserAccessCount,OriginalDatacenters,NewDatacenters,TotalDatacenters");
-        for (ReplicaData file : fichiers) {
-            String originalDCs = file.datacenterIds.stream().limit(2)
-                .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
-                .collect(Collectors.joining("; "));
-            String newDCs = file.datacenterIds.size() > 2 ? 
-                file.datacenterIds.stream().skip(2).map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")").collect(Collectors.joining("; ")) : "None";
-            lines.add(String.format("%d,%d,%d,%s,%s,%d", 
-                file.dataID, file.sizeMB, file.userAccess.size(), originalDCs, newDCs, file.datacenterIds.size()));
-        }
-        Files.write(path, lines, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_PLACEMENT_REPORT_PATH);
-    }
-
-    private static void generateSystemStateAfterReplicationCSV(List<ReplicaData> fichiers, 
-                                                                List<User> users,
-                                                                List<RegionInfo> datacenterInfos) throws IOException {
-        Path path = Paths.get(CSV_SYSTEM_STATE_AFTER_REPLICATION_PATH);
-        Files.createDirectories(path.getParent());
-        List<String> lines = new ArrayList<>();
-        lines.add("Timestamp," + System.currentTimeMillis());
+        lines.add("OptimizationDate," + new Date());
         lines.add("TotalFiles," + fichiers.size());
         lines.add("TotalReplicas," + fichiers.stream().mapToInt(f -> f.datacenterIds.size()).sum());
-        lines.add("FilesWithExtraReplicas," + fichiers.stream().filter(f -> f.datacenterIds.size() > 2).count());
+        lines.add("FillesOptimized," + optimizedReplicas.size());
+        lines.add("OptimizedPlacements," + optimizedPlacements.size());
+        
+        // Ajouter les détails des fichiers optimisés
         lines.add("");
-        lines.add("DatacenterID,Region,StorageUsedMB,StorageFreeMB,UsagePercentage");
-        for (RegionInfo dc : datacenterInfos) {
-            double usagePercentage = (double) dc.used / dc.storageCapacity * 100;
-            lines.add(String.format(Locale.US, "%d,%s,%d,%d,%.2f%%", 
-                dc.datacenterId, dc.region, dc.used, dc.storageLibre, usagePercentage));
+        lines.add("FileID,OptimizedReplicas,OptimizedPlacements");
+        for (Map.Entry<Integer, Integer> entry : optimizedReplicas.entrySet()) {
+            String placements = optimizedPlacements.containsKey(entry.getKey()) 
+                ? optimizedPlacements.get(entry.getKey()).toString() : "none";
+            lines.add(String.format("%d,%d,%s", entry.getKey(), entry.getValue(), placements));
+        }
+        
+        Files.write(path, lines, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        System.out.println("✓ Généré: " + CSV_OPTIMIZATION_SUMMARY_PATH);
+    }
+
+    private static void generateOptimizedReplicationLog(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
+        Path path = Paths.get(CSV_OPTIMIZED_REPLICATION_LOG_PATH);
+        Files.createDirectories(path.getParent());
+        List<String> lines = new ArrayList<>();
+        lines.add("FileID,SizeMB,UserAccessCount,TotalReplicas,ReplicaLocations,OptimizedBy");
+        for (ReplicaData file : fichiers) {
+            String replicaLocations = file.datacenterIds.stream()
+                .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
+                .collect(Collectors.joining("; "));
+            String optimizedBy = optimizedReplicas.containsKey(file.dataID) ? "SPEA2" : 
+                                 (optimizedPlacements.containsKey(file.dataID) ? "NSGA-II" : "Default");
+            lines.add(String.format("%d,%d,%d,%d,%s,%s",
+                file.dataID, file.sizeMB, file.userAccess.size(),
+                file.datacenterIds.size(), replicaLocations, optimizedBy));
         }
         Files.write(path, lines, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_SYSTEM_STATE_AFTER_REPLICATION_PATH);
+        System.out.println("✓ Généré: " + CSV_OPTIMIZED_REPLICATION_LOG_PATH);
     }
 
-    private static void generateSimulationSummaryCSV(List<ReplicaData> fichiers, List<User> users,
-                                                      List<RegionInfo> datacenterInfos) throws IOException {
-        Path path = Paths.get(CSV_SIMULATION_SUMMARY_PATH);
+    private static void generateOptimizedPlacementReport(List<ReplicaData> fichiers, Map<Integer, String> dcidToRegion) throws IOException {
+        Path path = Paths.get(CSV_OPTIMIZED_PLACEMENT_REPORT_PATH);
         Files.createDirectories(path.getParent());
         List<String> lines = new ArrayList<>();
-        lines.add("SimulationDate," + new Date());
-        lines.add("TotalFiles," + fichiers.size());
-        lines.add("TotalUsers," + users.size());
-        lines.add("TotalDatacenters," + datacenterInfos.size());
-        lines.add("TotalStorageCapacityMB," + datacenterInfos.stream().mapToInt(dc -> dc.storageCapacity).sum());
-        lines.add("TotalStorageUsedMB," + datacenterInfos.stream().mapToLong(dc -> dc.used).sum());
-        lines.add("TotalReplicas," + fichiers.stream().mapToInt(f -> f.datacenterIds.size()).sum());
-        lines.add("AverageReplicasPerFile," + String.format(Locale.US, "%.2f", 
-            (double) fichiers.stream().mapToInt(f -> f.datacenterIds.size()).sum() / fichiers.size()));
+        lines.add("FileID,FileSizeMB,UserAccessCount,AllReplicaLocations");
+        for (ReplicaData file : fichiers) {
+            String allReplicas = file.datacenterIds.stream()
+                .map(dcId -> dcId + "(" + dcidToRegion.get(dcId) + ")")
+                .collect(Collectors.joining("; "));
+            lines.add(String.format("%d,%d,%d,%s", 
+                file.dataID, file.sizeMB, file.userAccess.size(), allReplicas));
+        }
         Files.write(path, lines, StandardCharsets.UTF_8,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        System.out.println("✓ Généré: " + CSV_SIMULATION_SUMMARY_PATH);
+        System.out.println("✓ Généré: " + CSV_OPTIMIZED_PLACEMENT_REPORT_PATH);
     }
 
     private static String getRegionForDatacenter(int dcId) {
@@ -817,53 +856,9 @@ public class ReplicaPlacementSimulationOptimized2 {
             accessChanges, newAccessesAdded, accessesRemoved);
     }
 
-    private static void applyPopularityBasedReplication(List<ReplicaData> fichiers,
-                                                        Map<Integer, RegionInfo> datacenterMap,
-                                                        Map<Integer, String> dcidToRegion,
-                                                        Random random) {
-        System.out.println("\n=== RÉPLICATION BASÉE SUR LA POPULARITÉ ===");
-        
-        List<ReplicaData> sortedFiles = fichiers.stream()
-            .sorted(Comparator.comparingInt(f -> -f.userAccess.size()))
-            .collect(Collectors.toList());
-        
-        int replicationThreshold = (int) (fichiers.size() * 0.3);
-        int replicationCount = 0;
-        
-        for (int i = 0; i < replicationThreshold; i++) {
-            ReplicaData file = sortedFiles.get(i);
-            
-            Map<String, Integer> regionAccessCount = new HashMap<>();
-            for (int userId : file.userAccess.keySet()) {
-                int dcId = file.userToDatacenter.get(userId);
-                regionAccessCount.merge(dcidToRegion.get(dcId), 1, Integer::sum);
-            }
-            
-            List<String> candidateRegions = regionAccessCount.entrySet().stream()
-                .filter(e -> e.getValue() > file.userAccess.size() * 0.1)
-                .map(Map.Entry::getKey)
-                .collect(Collectors.toList());
-            
-            if (!candidateRegions.isEmpty()) {
-                String targetRegion = candidateRegions.get(random.nextInt(candidateRegions.size()));
-                List<RegionInfo> candidateDCs = datacenterMap.values().stream()
-                    .filter(dc -> dc.region.equals(targetRegion))
-                    .filter(dc -> dc.storageLibre >= file.sizeMB)
-                    .filter(dc -> !file.datacenterIds.contains(dc.datacenterId))
-                    .collect(Collectors.toList());
-                    
-                if (!candidateDCs.isEmpty()) {
-                    RegionInfo targetDC = candidateDCs.get(random.nextInt(candidateDCs.size()));
-                    file.datacenterIds.add(targetDC.datacenterId);
-                    targetDC.storageLibre -= file.sizeMB;
-                    targetDC.used += file.sizeMB;
-                    replicationCount++;
-                    System.out.printf("  + Réplique: Fichier %d (popularité=%d) → DC %d (%s)\n", 
-                        file.dataID, file.userAccess.size(), targetDC.datacenterId, targetRegion);
-                }
-            }
-        }
-        System.out.printf("✓ Réplication: %d fichiers répliqués\n", replicationCount);
+    private static AccessType getRandomAccessType(Random random) {
+        int val = random.nextInt(3);
+        return val == 0 ? AccessType.READ : (val == 1 ? AccessType.WRITE : AccessType.READ_WRITE);
     }
 
     private static void createOutputDirectoryIfNotExists() throws IOException {
@@ -872,6 +867,8 @@ public class ReplicaPlacementSimulationOptimized2 {
             Files.createDirectories(path);
             System.out.println("✓ Dossier créé: " + CSV_OUTPUT_DIR);
         }
+        Files.createDirectories(Paths.get(OPTIMIZATION_INPUT_DIR));
+        Files.createDirectories(Paths.get(OPTIMIZATION_OUTPUT_DIR));
     }
 
     // ==================== MÉTHODES STATIQUES INITIALES ====================
@@ -917,20 +914,6 @@ public class ReplicaPlacementSimulationOptimized2 {
         return bestDcMap;
     }
 
-    private static int createDatacenter(String name, String type) {
-        switch (type) { 
-            case "grand": return 100; 
-            case "moyen": return 60; 
-            case "mini": return 30; 
-            default: return 40; 
-        }
-    }
-
-    private static AccessType getRandomAccessType(Random random) {
-        int val = random.nextInt(3);
-        return val == 0 ? AccessType.READ : (val == 1 ? AccessType.WRITE : AccessType.READ_WRITE);
-    }
-
     private static void distributeFilesWithAccessRights(List<ReplicaData> fichiers, List<User> users,
                                                      Map<Integer, String> dcidToRegion,
                                                      Map<Integer, RegionInfo> datacenterMap,
@@ -972,7 +955,7 @@ public class ReplicaPlacementSimulationOptimized2 {
         }
     }
 
-    // ==================== MAIN ====================
+    // ==================== MAIN PRINCIPALE AVEC BOUCLE DE DRIFTS ====================
     
     public static void main(String[] args) {
         try {
@@ -980,15 +963,17 @@ public class ReplicaPlacementSimulationOptimized2 {
             
             System.out.println("=========================================");
             System.out.println("SIMULATION DE RÉPLICATION DE DONNÉES");
+            System.out.println("Avec boucle de " + NOMBRE_DRIFTS + " drifts");
             System.out.println("=========================================");
             System.out.println("Démarrage: " + new Date());
             System.out.println("Dossier local: " + CSV_OUTPUT_DIR);
             System.out.println();
             
+            // Configuration de base (datacenters, fichiers, utilisateurs)
             Random seededRandom = new Random(RANDOM_SEED);
             CloudSim.init(1, Calendar.getInstance(), false);
 
-            // Configuration des datacenters simplifiée
+            // Configuration des datacenters
             List<RegionInfo> datacenterInfos = new ArrayList<>();
             Map<Integer, String> dcidToRegion = new HashMap<>();
             Map<Integer, RegionInfo> datacenterMap = new HashMap<>();
@@ -1033,7 +1018,6 @@ public class ReplicaPlacementSimulationOptimized2 {
             // Création des fichiers (500 fichiers)
             List<ReplicaData> fichiers = new ArrayList<>();
             List<Integer> taillesFixes = Arrays.asList(1500, 2500, 5000, 7500, 10000);
-            List<Integer> allDatacenterIds = Arrays.asList(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30);
 
             System.out.println("Création de 500 fichiers...");
             for (int i = 1; i <= 500; i++) {
@@ -1070,63 +1054,91 @@ public class ReplicaPlacementSimulationOptimized2 {
             }
             System.out.println("Utilisateurs: " + users.size());
 
-            // Distribution des droits d'accès
+            // Distribution initiale des droits d'accès
             distributeFilesWithAccessRights(fichiers, users, dcidToRegion, datacenterMap, seededRandom);
             
-            // ==================== PHASE 1: ÉTAT INITIAL ====================
-            System.out.println("\n=== PHASE 1: GÉNÉRATION FICHIERS AVANT DRIFT ===");
-            generateUserAccessBeforeCSV(users);
-            generateDatacenterInfoBeforeCSV(datacenterInfos);
-            generateFileInfoBeforeCSV(fichiers, dcidToRegion);
-            generateVmInfoBeforeCSV(datacenterInfos);
-            generateFragmentInfoBeforeCSV();
-            
-            // ==================== PHASE 2: DRIFTS ====================
-            System.out.println("\n=== PHASE 2: APPLICATION DES DRIFTS ===");
-            Map<Integer, Integer> originalSizes = new HashMap<>();
-            Map<Integer, Map<Integer, AccessType>> originalAccess = new HashMap<>();
-            List<User> originalUsers = new ArrayList<>();
-            for (User user : users) {
-                User copy = new User(user.id, user.location);
-                copy.fileAccess.putAll(user.fileAccess);
-                originalUsers.add(copy);
+            // ==================== BOUCLE PRINCIPALE DES DRIFTS ====================
+            for (int driftId = 1; driftId <= NOMBRE_DRIFTS; driftId++) {
+                System.out.println("\n" + "=".repeat(60));
+                System.out.println("🚀 DRIFT " + driftId + "/" + NOMBRE_DRIFTS);
+                System.out.println("=".repeat(60));
+                
+                // Sauvegarder l'état AVANT ce drift
+                saveDriftResults(driftId, fichiers, users, datacenterInfos, dcidToRegion);
+                
+                // Générer les CSV avant drift (pour GitHub Actions)
+                generateUserAccessBeforeCSV(users);
+                generateDatacenterInfoBeforeCSV(datacenterInfos);
+                generateFileInfoBeforeCSV(fichiers, dcidToRegion);
+                generateVmInfoBeforeCSV(datacenterInfos);
+                generateFragmentInfoBeforeCSV();
+                
+                // Phase 1: Sauvegarder l'état original (avant drift)
+                Map<Integer, Integer> originalSizes = new HashMap<>();
+                Map<Integer, Map<Integer, AccessType>> originalAccess = new HashMap<>();
+                List<User> originalUsers = new ArrayList<>();
+                for (User user : users) {
+                    User copy = new User(user.id, user.location);
+                    copy.fileAccess.putAll(user.fileAccess);
+                    originalUsers.add(copy);
+                }
+                
+                // Phase 2: Appliquer les drifts
+                applyFileSizeDrift(fichiers, seededRandom, datacenterMap, originalSizes);
+                applyUserAccessDrift(users, fichiers, seededRandom, dcidToRegion, originalAccess);
+                
+                // Générer les rapports après drift
+                generateDriftImpactReport(fichiers, originalSizes, originalAccess);
+                generateUserAccessDriftLog(users, originalUsers);
+                generateUserAccessAfterDriftCSV(users);
+                generateDatacenterInfoAfterDriftCSV(datacenterInfos);
+                generateFileInfoAfterDriftCSV(fichiers, dcidToRegion);
+                generateFragmentInfoAfterDriftCSV();
+                generateSystemStateAfterDriftCSV(fichiers, users, datacenterInfos);
+                
+                // Phase 3: Générer les données pour l'optimisation (SPEA2/NSGA-II)
+                generateOptimizationInputData(fichiers, users, datacenterInfos, dcidToRegion);
+                
+                // Phase 4: Attendre les résultats d'optimisation de SPEA2/NSGA-II
+                System.out.println("\n📤 Données envoyées pour optimisation SPEA2/NSGA-II");
+                System.out.println("📁 Fichiers dans: " + OPTIMIZATION_INPUT_DIR);
+                
+                boolean optimizationReceived = waitForOptimizationResults(300); // 5 minutes max
+                
+                // Phase 5: Appliquer l'optimisation si reçue
+                if (optimizationReceived) {
+                    applyOptimizationToReplication(fichiers, datacenterMap);
+                } else {
+                    // Utiliser la réplication par popularité par défaut
+                    System.out.println("\n=== RÉPLICATION BASÉE SUR LA POPULARITÉ (DÉFAUT) ===");
+                    applyDefaultReplication(fichiers, datacenterMap, dcidToRegion, seededRandom);
+                }
+                
+                // Phase 6: Générer les rapports après optimisation
+                generateOptimizedReplicationLog(fichiers, dcidToRegion);
+                generateOptimizedPlacementReport(fichiers, dcidToRegion);
+                generateDatacenterInfoAfterDriftCSV(datacenterInfos);
+                generateFileInfoAfterDriftCSV(fichiers, dcidToRegion);
+                generateFragmentInfoAfterDriftCSV();
+                generateSystemStateAfterDriftCSV(fichiers, users, datacenterInfos);
+                generateOptimizationSummary(fichiers, datacenterInfos);
+                
+                // Phase 7: Sauvegarder les résultats après optimisation
+                saveAfterOptimizationResults(driftId, fichiers, datacenterInfos, dcidToRegion);
+                
+                System.out.println("\n✅ Drift " + driftId + " terminé avec succès");
+                
+                // Petite pause entre les drifts
+                Thread.sleep(1000);
             }
             
-            applyFileSizeDrift(fichiers, seededRandom, datacenterMap, originalSizes);
-            applyUserAccessDrift(users, fichiers, seededRandom, dcidToRegion, originalAccess);
-            
-            generateDriftImpactReport(fichiers, originalSizes, originalAccess);
-            generateUserAccessDriftLog(users, originalUsers);
-            generateUserAccessAfterDriftCSV(users);
-            generateDatacenterInfoAfterDriftCSV(datacenterInfos);
-            generateFileInfoAfterDriftCSV(fichiers, dcidToRegion);
-            generateFragmentInfoAfterDriftCSV();
-            generateSystemStateAfterDriftCSV(fichiers, users, datacenterInfos);
-            
-            // ==================== PHASE 3: DONNÉES OPTIMISATION ====================
-            generateOptimizationInputData(fichiers, users, datacenterInfos, dcidToRegion);
-            
-            // ==================== PHASE 4: RÉPLICATION ====================
-            System.out.println("\n=== PHASE 4: RÉPLICATION BASÉE SUR POPULARITÉ ===");
-            applyPopularityBasedReplication(fichiers, datacenterMap, dcidToRegion, seededRandom);
-            
-            generateReplicationLogCSV(fichiers, dcidToRegion);
-            generateDatacenterInfoAfterReplicationCSV(datacenterInfos);
-            generateFileInfoAfterReplicationCSV(fichiers, dcidToRegion);
-            generateFragmentInfoAfterReplicationCSV();
-            generatePlacementReportCSV(fichiers, dcidToRegion);
-            generateSystemStateAfterReplicationCSV(fichiers, users, datacenterInfos);
-            generateSimulationSummaryCSV(fichiers, users, datacenterInfos);
-            
-            // ==================== PHASE 5: UPLOAD ====================
-            uploadToGoogleDrive();
-            
             // ==================== RAPPORT FINAL ====================
-            System.out.println("\n=========================================");
+            System.out.println("\n" + "=".repeat(60));
             System.out.println("✅ SIMULATION TERMINÉE AVEC SUCCÈS");
-            System.out.println("=========================================");
+            System.out.println("=".repeat(60));
+            System.out.println("📁 " + NOMBRE_DRIFTS + " drifts traités");
             System.out.println("📁 Dossier local: " + CSV_OUTPUT_DIR);
-            System.out.println("=========================================");
+            System.out.println("=".repeat(60));
 
             CloudSim.stopSimulation();
             
@@ -1134,5 +1146,54 @@ public class ReplicaPlacementSimulationOptimized2 {
             System.err.println("❌ ERREUR: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+    
+    private static void applyDefaultReplication(List<ReplicaData> fichiers,
+                                                Map<Integer, RegionInfo> datacenterMap,
+                                                Map<Integer, String> dcidToRegion,
+                                                Random random) {
+        System.out.println("\n=== RÉPLICATION BASÉE SUR LA POPULARITÉ ===");
+        
+        List<ReplicaData> sortedFiles = fichiers.stream()
+            .sorted(Comparator.comparingInt(f -> -f.userAccess.size()))
+            .collect(Collectors.toList());
+        
+        int replicationThreshold = (int) (fichiers.size() * 0.3);
+        int replicationCount = 0;
+        
+        for (int i = 0; i < replicationThreshold; i++) {
+            ReplicaData file = sortedFiles.get(i);
+            
+            Map<String, Integer> regionAccessCount = new HashMap<>();
+            for (int userId : file.userAccess.keySet()) {
+                int dcId = file.userToDatacenter.get(userId);
+                regionAccessCount.merge(dcidToRegion.get(dcId), 1, Integer::sum);
+            }
+            
+            List<String> candidateRegions = regionAccessCount.entrySet().stream()
+                .filter(e -> e.getValue() > file.userAccess.size() * 0.1)
+                .map(Map.Entry::getKey)
+                .collect(Collectors.toList());
+            
+            if (!candidateRegions.isEmpty()) {
+                String targetRegion = candidateRegions.get(random.nextInt(candidateRegions.size()));
+                List<RegionInfo> candidateDCs = datacenterMap.values().stream()
+                    .filter(dc -> dc.region.equals(targetRegion))
+                    .filter(dc -> dc.storageLibre >= file.sizeMB)
+                    .filter(dc -> !file.datacenterIds.contains(dc.datacenterId))
+                    .collect(Collectors.toList());
+                    
+                if (!candidateDCs.isEmpty()) {
+                    RegionInfo targetDC = candidateDCs.get(random.nextInt(candidateDCs.size()));
+                    file.datacenterIds.add(targetDC.datacenterId);
+                    targetDC.storageLibre -= file.sizeMB;
+                    targetDC.used += file.sizeMB;
+                    replicationCount++;
+                    System.out.printf("  + Réplique: Fichier %d (popularité=%d) → DC %d (%s)\n", 
+                        file.dataID, file.userAccess.size(), targetDC.datacenterId, targetRegion);
+                }
+            }
+        }
+        System.out.printf("✓ Réplication: %d fichiers répliqués\n", replicationCount);
     }
 }
