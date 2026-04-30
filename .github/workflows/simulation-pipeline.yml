@@ -1,18 +1,12 @@
-name: Pipeline CloudSim avec Optimisation
+name: Pipeline CloudSim
 
 on:
   workflow_dispatch:
     inputs:
       drift_id:
-        description: 'ID du drift à simuler'
+        description: 'ID du drift'
         required: true
         default: '1'
-      optimization_mode:
-        description: "Mode d'optimisation"
-        required: false
-        default: 'full'
-        type: choice
-        options: ['full', 'spea2_only', 'nsga2_only']
 
 jobs:
   simulation:
@@ -28,17 +22,17 @@ jobs:
           distribution: 'temurin'
           java-version: '11'
       
-      - name: Download optimization results from Google Drive
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workflow: optimization-orchestrator.yml
-          name: optimization-results
-          path: results/optimization_input/
-      
-      - name: Exécution de la simulation
+      - name: Configuration Google Drive
         env:
-          DRIFT_ID: ${{ github.event.inputs.drift_id }}
+          DRIVE_CREDENTIALS: ${{ secrets.DRIVE_CREDENTIALS }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+        run: |
+          # Sauvegarder les credentials
+          echo "$DRIVE_CREDENTIALS" > /tmp/credentials.json
+          echo "✅ Credentials configurés"
+          echo "📁 Folder ID: $DRIVE_FOLDER_ID"
+      
+      - name: Exécution simulation
         run: |
           chmod +x run-simulation.sh
           ./run-simulation.sh
@@ -47,10 +41,10 @@ jobs:
         uses: lychee-actions/lychee-upload@v1
         with:
           target: results/
-          google_credentials: ${{ secrets.GOOGLE_CREDENTIALS }}
-          folder_id: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          google_credentials: ${{ secrets.DRIVE_CREDENTIALS }}
+          folder_id: ${{ secrets.DRIVE_FOLDER_ID }}
       
-      - name: Télécharger les artefacts
+      - name: Sauvegarde artefacts
         uses: actions/upload-artifact@v4
         with:
           name: simulation-results-drift-${{ github.event.inputs.drift_id }}
