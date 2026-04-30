@@ -1,14 +1,25 @@
-name: Pipeline CloudSim
+name: Pipeline CloudSim avec Optimisation
 
 on:
   workflow_dispatch:
+    inputs:
+      drift_id:
+        description: 'ID du drift à simuler'
+        required: true
+        default: '1'
+      optimization_mode:
+        description: "Mode d'optimisation"
+        required: false
+        default: 'full'
+        type: choice
+        options: ['full', 'spea2_only', 'nsga2_only']
 
 jobs:
   simulation:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Recuperation du code
+      - name: Récupération du code
         uses: actions/checkout@v4
       
       - name: Installation Java
@@ -17,22 +28,30 @@ jobs:
           distribution: 'temurin'
           java-version: '11'
       
-      - name: Permissions scripts
-        run: |
-          chmod +x build.sh
-          chmod +x run-simulation.sh
+      - name: Download optimization results from Google Drive
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          workflow: optimization-orchestrator.yml
+          name: optimization-results
+          path: results/optimization_input/
       
-      - name: Compilation
-        run: ./build.sh
-      
-      - name: Execution
+      - name: Exécution de la simulation
+        env:
+          DRIFT_ID: ${{ github.event.inputs.drift_id }}
         run: |
           chmod +x run-simulation.sh
           ./run-simulation.sh
       
-      - name: Sauvegarde resultats
+      - name: Upload résultats vers Google Drive
+        uses: lychee-actions/lychee-upload@v1
+        with:
+          target: results/
+          google_credentials: ${{ secrets.GOOGLE_CREDENTIALS }}
+          folder_id: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+      
+      - name: Télécharger les artefacts
         uses: actions/upload-artifact@v4
         with:
-          name: simulation-results-${{ github.run_id }}
+          name: simulation-results-drift-${{ github.event.inputs.drift_id }}
           path: results/
-          retention-days: 30
