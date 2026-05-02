@@ -1,724 +1,652 @@
 import org.cloudbus.cloudsim.*;
 import org.cloudbus.cloudsim.core.CloudSim;
-import org.cloudbus.cloudsim.provisioners.*;
-
 import java.util.*;
 import java.util.stream.Collectors;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.text.SimpleDateFormat;
 import java.util.Locale;
 
 /**
- * ╔══════════════════════════════════════════════════════════════╗
- * ║  ReplicaPlacementFast  —  Version Optimisée 120+ drifts     ║
- * ╠══════════════════════════════════════════════════════════════╣
- * ║  PROBLÈME ORIGINAL : Java bloquait 300s/drift → 10h/120     ║
- * ║                                                              ║
- * ║  SOLUTION :                                                  ║
- * ║  • Java NON-BLOQUANT : 0 attente Python                      ║
- * ║  • Chaque drift → dossier isolé drift_N/                     ║
- * ║  • 6 CSV par drift :                                         ║
- * ║      drift_N/avant/datacenter_information.csv                ║
- * ║      drift_N/avant/file_information.csv                      ║
- * ║      drift_N/avant/user_access_details.csv                   ║
- * ║      drift_N/apres/datacenter_information.csv                ║
- * ║      drift_N/apres/file_information.csv                      ║
- * ║      drift_N/apres/user_access_details.csv                   ║
- * ║  • Python traite en batch asynchrone en parallèle            ║
- * ║  • 120 drifts en ~5-10 minutes au lieu de 10h               ║
- * ╚══════════════════════════════════════════════════════════════╝
+ * ReplicaPlacementSimulationOptimized2 — Version finale corrigée
+ *
+ * FLUX PAR DRIFT i (i = 1..120) :
+ * ┌────────────────────────────────────────────────────────────────┐
+ * │  [A] Générer 3 CSV avant drift i                               │
+ * │       drift_NNNN/driftNNNN_avant_datacenter_information.csv    │
+ * │       drift_NNNN/driftNNNN_avant_file_information.csv          │
+ * │       drift_NNNN/driftNNNN_avant_useraccess_details.csv        │
+ * │                                                                │
+ * │  [B] Appliquer le drift (tailles + accès utilisateurs)         │
+ * │                                                                │
+ * │  [C] Optimisation SPEA2 → 3 CSV après SPEA2                   │
+ * │  [D] Optimisation NSGA-II → 3 CSV après NSGA-II               │
+ * │       (ces 3 CSV = état appliqué dans CloudSim avant drift i+1)│
+ * │                                                                │
+ * │  [E] L'état NSGA-II devient l'entrée du drift i+1             │
+ * └────────────────────────────────────────────────────────────────┘
+ *
+ * POUR UTILISER VOS VRAIES CLASSES SPEA2/NSGA-II :
+ *   Remplacez les lignes marquées "TODO" dans main() par :
+ *     ReplicaOptimizer spea2 = new SPEA2Optimizer();   // votre classe
+ *     ReplicaOptimizer nsga2 = new NSGA2Optimizer();   // votre classe
  */
-public class ReplicaPlacementFast {
+public class ReplicaPlacementSimulationOptimized2 {
 
-    // ══════════════════════════════════════════════════════════════
-    //  PARAMÈTRES — modifier ici uniquement
-    // ══════════════════════════════════════════════════════════════
+    // ── Constantes ─────────────────────────────────────────────────────────────
+    private static final long   RANDOM_SEED  = 12345L;
+    private static final int    VMS_PER_HOST = 5;
+    private static final int    N_DRIFTS     = 120;
 
-    private static final int    NOMBRE_DRIFTS  = 120;
-    private static final long   RANDOM_SEED    = 12345L;
-    private static final int    VMS_PER_HOST   = 5;
+    private static final String CSV_OUTPUT_DIR =
+        System.getProperty("user.home") +
+        (System.getProperty("os.name").toLowerCase().contains("win")
+            ? "\\Desktop\\testcodedreplicationcsv\\"
+            : "/results/");
 
-    // Délai max d'attente Python par drift (millisecondes)
-    // 0 = complètement non-bloquant (recommandé pour 120+ drifts)
-    // 5000 = attend 5s max si Python est rapide
-    private static final long   PYTHON_WAIT_MS = 0L;
+    // ── Maps latence/région ────────────────────────────────────────────────────
+    private static final Map<String, String> BEST_DC_MAP = createBestDcMap();
 
-    private static final int    VM_MIPS  = 1000;
-    private static final int    VM_PES   = 1;
-    private static final int    VM_RAM   = 2048;
-    private static final long   VM_BW    = 1000;
-    private static final long   VM_SIZE  = 10_000;
-    private static final String VMM      = "Xen";
+    // ── État VMs ───────────────────────────────────────────────────────────────
+    private static Map<Integer, Integer> vmStorageFree = new HashMap<>();
+    private static Map<Integer, Integer> vmToDcMap     = new HashMap<>();
 
-    // ══════════════════════════════════════════════════════════════
-    //  CHEMINS
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    // TYPES
+    // ══════════════════════════════════════════════════════════════════════════
 
-    private static final String BASE;
-    static {
-        String env = System.getenv("CLOUDSIM_DRIVE_PATH");
-        BASE = (env != null && !env.isEmpty())
-            ? (env.endsWith("/") ? env : env + "/")
-            : System.getProperty("user.home") + "/cloudsim_optimization/";
-    }
+    enum AccessType { READ, WRITE, READ_WRITE }
 
-    // Java écrit les inputs pour Python ici :  input/drift_N/
-    private static final String INPUT_BASE   = BASE + "input/";
-    // Java lit les résultats Python ici :      output/drift_N/
-    private static final String OUTPUT_BASE  = BASE + "output/";
-    // Résultats finaux (avant + après) ici :   results/drift_N/avant/ et /apres/
-    private static final String RESULTS_BASE = BASE + "results/";
+    static class User {
+        int id;
+        String location;
+        Map<Integer, AccessType> fileAccess      = new HashMap<>();
+        Map<Integer, Integer>    fileToDatacenter = new HashMap<>();
 
-    // ══════════════════════════════════════════════════════════════
-    //  ÉTAT GLOBAL
-    // ══════════════════════════════════════════════════════════════
+        User(int id, String location) { this.id = id; this.location = location; }
 
-    private static final Map<Integer, Integer>       vmFree            = new HashMap<>();
-    private static final Map<Integer, Integer>       vmToDc            = new HashMap<>();
-    private static final Map<Integer, Integer>       pyReplicas        = new HashMap<>();
-    private static final Map<Integer, List<Integer>> pyPlacements      = new HashMap<>();
-    private static final Map<String, String>         BEST_DC_MAP       = buildBestDcMap();
-
-    // ══════════════════════════════════════════════════════════════
-    //  MODÈLE DE DONNÉES
-    // ══════════════════════════════════════════════════════════════
-
-    enum AT { READ, WRITE, READ_WRITE }
-
-    static class Fichier {
-        int id, sizeMB, importance;
-        List<Integer>         dcs        = new ArrayList<>();
-        Map<Integer, AT>      userAccess = new HashMap<>();
-        Map<Integer, Integer> userToDc   = new HashMap<>();
-
-        Fichier(int id, int sizeMB, int importance, List<Integer> dcs) {
-            this.id = id; this.sizeMB = sizeMB; this.importance = importance;
-            this.dcs.addAll(dcs);
-        }
-        void addUser(int uid, AT a, int dcId) {
-            userAccess.put(uid, a); userToDc.put(uid, dcId);
-        }
-        // Copie profonde pour snapshot avant-drift
-        Fichier snapshot() {
-            Fichier c = new Fichier(id, sizeMB, importance, dcs);
-            c.userAccess.putAll(userAccess);
-            c.userToDc.putAll(userToDc);
-            return c;
+        void addFileAccess(int fileId, AccessType access, int dcId) {
+            fileAccess.put(fileId, access);
+            fileToDatacenter.put(fileId, dcId);
         }
     }
 
-    static class Utilisateur {
-        int id; String location;
-        Map<Integer, AT>      access  = new HashMap<>();
-        Map<Integer, Integer> fileToDc = new HashMap<>();
-        Utilisateur(int id, String loc) { this.id = id; this.location = loc; }
-        void addAccess(int fid, AT a, int dcId) { access.put(fid, a); fileToDc.put(fid, dcId); }
-        Utilisateur snapshot() {
-            Utilisateur c = new Utilisateur(id, location);
-            c.access.putAll(access); c.fileToDc.putAll(fileToDc); return c;
+    static class ReplicaData {
+        int dataID, sizeMB, importance, popularite;
+        List<Integer>            datacenterIds;
+        Map<Integer, AccessType> userAccess           = new HashMap<>();
+        Map<Integer, Integer>    userToDatacenter     = new HashMap<>();
+        Map<Integer, Integer>    accessCountByDc      = new HashMap<>();
+
+        ReplicaData(int id, int size, int imp, int pop, List<Integer> dcIds) {
+            dataID = id; sizeMB = size; importance = imp; popularite = pop;
+            datacenterIds = dcIds;
+            for (int dc : dcIds) accessCountByDc.put(dc, 0);
+        }
+        void addUserAccess(int uid, AccessType acc, int dcId) {
+            userAccess.put(uid, acc);
+            userToDatacenter.put(uid, dcId);
+            accessCountByDc.merge(dcId, 1, Integer::sum);
+        }
+        void updateSize(int s) { sizeMB = s; }
+    }
+
+    static class RegionInfo {
+        int datacenterId, hostCount, storageCapacity, storageLibre, used, vmCount;
+        String region, typeDc;
+        double costPerCloudlet;
+
+        RegionInfo(int id, String reg, double cost, String type, int hosts, int storage) {
+            datacenterId = id; region = reg; costPerCloudlet = cost;
+            typeDc = type; hostCount = hosts; storageCapacity = storage;
+            storageLibre = storage; used = 0;
+            vmCount = hosts * VMS_PER_HOST;
         }
     }
 
-    static class DC {
-        int id, hosts, capacite, utilise, libre, nbVms;
-        String region, type; double cout;
-        List<Vm> vms = new ArrayList<>();
-        DC(int id, String region, String type, double cout, int hosts) {
-            this.id = id; this.region = region; this.type = type;
-            this.cout = cout; this.hosts = hosts;
-            this.capacite = hosts * 100_000;
-            this.libre = this.capacite; this.utilise = 0;
-            this.nbVms = hosts * VMS_PER_HOST;
-        }
-        DC snapshot() {
-            DC c = new DC(id, region, type, cout, hosts);
-            c.utilise = utilise; c.libre = libre; c.nbVms = nbVms;
-            return c;
-        }
+    // ══════════════════════════════════════════════════════════════════════════
+    // INTERFACE OPTIMISEUR
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Interface à implémenter dans vos classes SPEA2Optimizer / NSGA2Optimizer.
+     * La méthode optimize() reçoit l'état POST-drift et retourne l'état optimisé.
+     */
+    interface ReplicaOptimizer {
+        /**
+         * @param fichiers      fichiers avec répliques actuelles (post-drift)
+         * @param dcMap         map dcId → RegionInfo
+         * @param dcidToRegion  map dcId → nom région
+         * @param users         utilisateurs
+         * @param rng           générateur aléatoire
+         * @return fichiers avec placement optimisé
+         */
+        List<ReplicaData> optimize(
+            List<ReplicaData>        fichiers,
+            Map<Integer, RegionInfo> dcMap,
+            Map<Integer, String>     dcidToRegion,
+            List<User>               users,
+            Random                   rng
+        );
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  MAIN
-    // ══════════════════════════════════════════════════════════════
+    // ── SPEA2 de secours ───────────────────────────────────────────────────────
+    static class SPEA2FallbackOptimizer implements ReplicaOptimizer {
+        @Override
+        public List<ReplicaData> optimize(List<ReplicaData> fichiers,
+                Map<Integer, RegionInfo> dcMap, Map<Integer, String> dcidToRegion,
+                List<User> users, Random rng) {
 
-    public static void main(String[] args) throws Exception {
-        Files.createDirectories(Paths.get(INPUT_BASE));
-        Files.createDirectories(Paths.get(OUTPUT_BASE));
-        Files.createDirectories(Paths.get(RESULTS_BASE));
+            System.out.println("    [SPEA2 fallback] priorisation par popularité...");
+            // Trier par accès décroissant
+            List<ReplicaData> sorted = new ArrayList<>(fichiers);
+            sorted.sort((a, b) -> b.userAccess.size() - a.userAccess.size());
 
-        System.out.println("╔══════════════════════════════════════════════════╗");
-        System.out.printf ("║  SIMULATION FAST — %d drifts%n", NOMBRE_DRIFTS);
-        System.out.printf ("║  Base : %s%n", BASE);
-        System.out.println("╚══════════════════════════════════════════════════╝");
+            // Ajouter une réplique aux 30% les plus populaires
+            int threshold = sorted.size() / 3;
+            int added = 0;
+            List<RegionInfo> dcLibre = new ArrayList<>(dcMap.values());
+            dcLibre.sort((a, b) -> b.storageLibre - a.storageLibre);
 
-        CloudSim.init(1, Calendar.getInstance(), false);
-        DatacenterBroker broker = new DatacenterBroker("Broker");
-
-        // ── 30 Datacenters ──
-        String[] regions = {
-            "Europe","Europe","Europe","Europe","Europe","Europe",
-            "USA","USA","USA","USA","USA","USA",
-            "Asie","Asie","Asie","Asie","Asie","Asie",
-            "Afrique","Afrique","Afrique","Afrique","Afrique","Afrique",
-            "AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud"
-        };
-        String[] types = {
-            "grand","grand","moyen","moyen","mini","mini",
-            "grand","grand","grand","moyen","moyen","mini",
-            "grand","grand","moyen","moyen","mini","mini",
-            "grand","moyen","moyen","mini","mini","mini",
-            "grand","moyen","moyen","mini","mini","mini"
-        };
-        double[] couts = {
-            0.06,0.06,0.06,0.06,0.06,0.06,
-            0.05,0.05,0.05,0.05,0.05,0.05,
-            0.045,0.045,0.045,0.045,0.045,0.045,
-            0.035,0.035,0.035,0.035,0.035,0.035,
-            0.04,0.04,0.04,0.04,0.04,0.04
-        };
-
-        List<DC> dcList = new ArrayList<>();
-        Map<Integer, DC> dcMap = new HashMap<>();
-        Map<Integer, String> dcRegion = new HashMap<>();
-
-        for (int i = 1; i <= 30; i++) {
-            int h = types[i-1].equals("grand") ? 100 : types[i-1].equals("moyen") ? 60 : 30;
-            DC dc = new DC(i, regions[i-1], types[i-1], couts[i-1], h);
-            createCloudSimDC("DC_" + i, h, couts[i-1]);
-            dcList.add(dc); dcMap.put(i, dc); dcRegion.put(i, regions[i-1]);
-        }
-
-        // ── VMs ──
-        int vid = 1;
-        for (DC dc : dcList) {
-            for (int j = 0; j < dc.nbVms; j++) {
-                Vm vm = new Vm(vid, broker.getId(), VM_MIPS, VM_PES, VM_RAM,
-                               VM_BW, VM_SIZE, VMM, new CloudletSchedulerTimeShared());
-                dc.vms.add(vm);
-                vmFree.put(vid, (int)VM_SIZE);
-                vmToDc.put(vid, dc.id);
-                vid++;
-            }
-        }
-
-        // ── 500 fichiers ──
-        Random rng = new Random(RANDOM_SEED);
-        int[] tailles = {1500, 2500, 5000, 7500, 10000};
-        List<Fichier> fichiers = new ArrayList<>();
-        for (int i = 1; i <= 500; i++) {
-            List<Integer> fDcs = new ArrayList<>();
-            fDcs.add(((i-1) % 30) + 1);
-            int d2 = ((i-1) + 15) % 30 + 1;
-            if (d2 != fDcs.get(0)) fDcs.add(d2);
-            fichiers.add(new Fichier(i, tailles[(i-1) % 5], ((i-1) % 5) + 1, fDcs));
-        }
-        // stockage initial
-        for (Fichier f : fichiers)
-            for (int dcId : f.dcs) { DC dc = dcMap.get(dcId); dc.utilise += f.sizeMB; dc.libre -= f.sizeMB; }
-
-        // ── 1000 utilisateurs ──
-        String[] locs  = {"Paris (France)","Berlin (Allemagne)","Madrid (Espagne)",
-                           "New York (USA)","San Francisco (USA)","Tokyo (Japon)",
-                           "Mumbai (Inde)","Nairobi (Kenya)","Lagos (Nigeria)","Le Caire (Egypte)"};
-        int[]    nbUs  = {80,160,100,120,80,100,120,60,100,80};
-        List<Utilisateur> users = new ArrayList<>();
-        int uid = 1;
-        for (int i = 0; i < locs.length; i++)
-            for (int j = 0; j < nbUs[i]; j++)
-                users.add(new Utilisateur(uid++, locs[i]));
-
-        initAccess(fichiers, users, dcRegion, rng);
-
-        // ══════════════════════════════════════════════════════════
-        //  BOUCLE PRINCIPALE — NON-BLOQUANTE
-        // ══════════════════════════════════════════════════════════
-
-        long globalT = System.currentTimeMillis();
-        List<String> summary = new ArrayList<>();
-        summary.add("DriftID,DureeMs,Source,NbFichiersOpt,NbPlacements,TotalRepliques");
-
-        for (int driftId = 1; driftId <= NOMBRE_DRIFTS; driftId++) {
-            long t0 = System.currentTimeMillis();
-            System.out.printf("%n─── Drift %3d/%d ───%n", driftId, NOMBRE_DRIFTS);
-
-            String driftBase   = RESULTS_BASE + "drift_" + driftId + "/";
-            String avantDir    = driftBase + "avant/";
-            String apresDir    = driftBase + "apres/";
-            String inputDrift  = INPUT_BASE + "drift_" + driftId + "/";
-
-            Files.createDirectories(Paths.get(avantDir));
-            Files.createDirectories(Paths.get(apresDir));
-            Files.createDirectories(Paths.get(inputDrift));
-
-            try {
-                // ══ ÉTAPE 1 : Snapshot AVANT drift → 3 CSV "avant" ══════
-                // Ces 3 CSV représentent l'état APRÈS le drift N-1 (avant le drift N)
-                List<DC>          dcSnap   = dcList.stream().map(DC::snapshot).collect(Collectors.toList());
-                List<Fichier>     fSnap    = fichiers.stream().map(Fichier::snapshot).collect(Collectors.toList());
-                List<Utilisateur> uSnap    = users.stream().map(Utilisateur::snapshot).collect(Collectors.toList());
-
-                ecrireDcCsv   (avantDir + "datacenter_information.csv", dcSnap);
-                ecrireFichiersCsv(avantDir + "file_information.csv",    fSnap, dcRegion);
-                ecrireUsersCsv(avantDir + "user_access_details.csv",    uSnap, dcRegion);
-                System.out.println("  ✓ CSV avant drift écrits");
-
-                // ══ ÉTAPE 2 : Appliquer le drift ════════════════════════
-                applyDriftTailles(fichiers, rng, dcMap);
-                applyDriftAcces  (fichiers, users, rng, dcRegion);
-
-                // ══ ÉTAPE 3 : Écrire inputs pour Python ═════════════════
-                ecrireInputsPython(inputDrift, fichiers, users, dcList, dcRegion, driftId);
-
-                // ══ ÉTAPE 4 : Lire résultats Python (NON-BLOQUANT) ══════
-                // Si Python a déjà traité ce drift → on applique ses résultats
-                // Sinon → réplication par défaut immédiate (0 attente)
-                boolean optimise = lireResultatsPython(driftId);
-
-                // ══ ÉTAPE 5 : Appliquer optimisation ou défaut ══════════
-                if (optimise) {
-                    appliquerOptimisation(fichiers, dcMap);
-                } else {
-                    appliquerDefaut(fichiers, dcMap, dcRegion, rng);
-                }
-
-                // ══ ÉTAPE 6 : Snapshot APRÈS optimisation → 3 CSV "apres" ══
-                ecrireDcCsv      (apresDir + "datacenter_information.csv", dcList);
-                ecrireFichiersCsv(apresDir + "file_information.csv",       fichiers, dcRegion);
-                ecrireUsersCsv   (apresDir + "user_access_details.csv",    users, dcRegion);
-                System.out.println("  ✓ CSV après optimisation écrits");
-
-                // ══ Résumé drift ════════════════════════════════════════
-                long elapsed = System.currentTimeMillis() - t0;
-                int totRep = fichiers.stream().mapToInt(f -> f.dcs.size()).sum();
-                summary.add(String.format("%d,%d,%s,%d,%d,%d",
-                    driftId, elapsed,
-                    optimise ? "SPEA2+NSGA2" : "Defaut",
-                    pyReplicas.size(), pyPlacements.size(), totRep));
-
-                System.out.printf("  ✓ Drift %d terminé en %d ms [%s] répliques=%d%n",
-                    driftId, elapsed, optimise ? "SPEA2+NSGA2" : "Defaut", totRep);
-
-            } catch (Exception e) {
-                System.err.printf("  ✗ Erreur drift %d : %s%n", driftId, e.getMessage());
-                e.printStackTrace();
-            }
-        }
-
-        // ── Résumé global ──
-        ecrireCSV(RESULTS_BASE + "global_summary.csv", summary);
-        long total = System.currentTimeMillis() - globalT;
-        System.out.printf("%n╔══════════════════════════════════════════════════╗%n");
-        System.out.printf("║  ✅ %d drifts en %.1f s (%.2f s/drift)%n",
-            NOMBRE_DRIFTS, total/1000.0, (double)total/NOMBRE_DRIFTS/1000.0);
-        System.out.printf("║  Résultats : %s%n", RESULTS_BASE);
-        System.out.printf("╚══════════════════════════════════════════════════╝%n");
-
-        CloudSim.stopSimulation();
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  LECTURE NON-BLOQUANTE DES RÉSULTATS PYTHON
-    // ══════════════════════════════════════════════════════════════
-
-    private static boolean lireResultatsPython(int driftId) {
-        Path resultF    = Paths.get(OUTPUT_BASE + "drift_" + driftId + "/optimization_result.csv");
-        Path placementF = Paths.get(OUTPUT_BASE + "drift_" + driftId + "/optimization_placement.csv");
-
-        long deadline = System.currentTimeMillis() + PYTHON_WAIT_MS;
-        do {
-            if (Files.exists(resultF) && Files.exists(placementF)) {
-                return chargerResultats(resultF, placementF);
-            }
-            if (PYTHON_WAIT_MS > 0) {
-                try { Thread.sleep(200); } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt(); break;
+            for (int i = 0; i < threshold && i < dcLibre.size(); i++) {
+                ReplicaData file = sorted.get(i);
+                for (RegionInfo dc : dcLibre) {
+                    if (!file.datacenterIds.contains(dc.datacenterId)
+                            && dc.storageLibre >= file.sizeMB) {
+                        file.datacenterIds.add(dc.datacenterId);
+                        dc.storageLibre -= file.sizeMB;
+                        dc.used         += file.sizeMB;
+                        added++;
+                        break;
+                    }
                 }
             }
-        } while (System.currentTimeMillis() < deadline);
-
-        pyReplicas.clear(); pyPlacements.clear();
-        return false;
-    }
-
-    private static boolean chargerResultats(Path rFile, Path pFile) {
-        pyReplicas.clear(); pyPlacements.clear();
-        try {
-            // SPEA2
-            List<String> lines = Files.readAllLines(rFile);
-            if (lines.size() < 2) return false;
-            String[] h = lines.get(0).split(",");
-            int fC = col(h,"fileid","file_id","id");
-            int rC = col(h,"replicas","replicacount","nbcopies");
-            int sC = col(h,"selected","selection","is_selected");
-            for (int i = 1; i < lines.size(); i++) {
-                String[] p = lines.get(i).trim().split(",");
-                if (fC < 0 || fC >= p.length) continue;
-                int fid = Integer.parseInt(p[fC].trim());
-                int rep = 2;
-                if (rC >= 0 && rC < p.length) {
-                    try { int r = Integer.parseInt(p[rC].trim()); if (r>=1&&r<=5) rep=r; }
-                    catch (NumberFormatException ignored) {}
-                } else if (sC >= 0 && sC < p.length) {
-                    String s = p[sC].trim().toLowerCase();
-                    if (s.equals("yes")||s.equals("true")||s.equals("1")) rep = 3;
-                }
-                pyReplicas.put(fid, rep);
-            }
-            // NSGA-II
-            List<String> pl = Files.readAllLines(pFile);
-            if (pl.size() >= 2) {
-                String[] ph = pl.get(0).split(",");
-                int pfC = col(ph,"fileid","file_id","id");
-                int pdC = col(ph,"datacenterid","dc_id","datacenter");
-                for (int i = 1; i < pl.size(); i++) {
-                    String[] p = pl.get(i).trim().split(",");
-                    if (pfC<0||pdC<0||pfC>=p.length||pdC>=p.length) continue;
-                    int fid = Integer.parseInt(p[pfC].trim());
-                    int did = Integer.parseInt(p[pdC].trim());
-                    pyPlacements.computeIfAbsent(fid, k -> new ArrayList<>()).add(did);
-                }
-            }
-            System.out.printf("  [Python] SPEA2=%d NSGA2=%d%n", pyReplicas.size(), pyPlacements.size());
-            return !pyReplicas.isEmpty() || !pyPlacements.isEmpty();
-        } catch (Exception e) {
-            System.err.println("  [Python] Erreur lecture : " + e.getMessage());
-            return false;
+            System.out.printf("    [SPEA2 fallback] %d répliques ajoutées%n", added);
+            return sorted;
         }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  ÉCRITURE DES INPUTS POUR PYTHON
-    // ══════════════════════════════════════════════════════════════
+    // ── NSGA-II de secours ────────────────────────────────────────────────────
+    static class NSGA2FallbackOptimizer implements ReplicaOptimizer {
+        @Override
+        public List<ReplicaData> optimize(List<ReplicaData> fichiers,
+                Map<Integer, RegionInfo> dcMap, Map<Integer, String> dcidToRegion,
+                List<User> users, Random rng) {
 
-    private static void ecrireInputsPython(String dir, List<Fichier> fichiers,
-            List<Utilisateur> users, List<DC> dcList,
-            Map<Integer, String> dcRegion, int driftId) throws IOException {
+            System.out.println("    [NSGA-II fallback] équilibrage de charge...");
+            double totalUsed = dcMap.values().stream().mapToInt(d -> d.used).sum();
+            double avg       = totalUsed / dcMap.size();
 
-        // file_information.csv
-        List<String> l = new ArrayList<>();
-        l.add("FileID,Taille(MB),Importance,Popularite,ReplicaCount,CurrentDatacenters,FrequenceAcces");
-        for (Fichier f : fichiers) {
-            String dcs = f.dcs.stream().map(String::valueOf).collect(Collectors.joining(";"));
-            int freq = (int)(f.userAccess.values().stream().filter(a->a!=AT.WRITE).count()
-                           + f.userAccess.values().stream().filter(a->a!=AT.READ).count());
-            l.add(String.format(Locale.US, "%d,%d,%d,%d,%d,%s,%d",
-                f.id, f.sizeMB, f.importance, f.userAccess.size(), f.dcs.size(), dcs, freq));
-        }
-        ecrireCSV(dir + "file_information.csv", l);
+            List<RegionInfo> over  = dcMap.values().stream()
+                .filter(d -> d.used > avg * 1.2).collect(Collectors.toList());
+            List<RegionInfo> under = dcMap.values().stream()
+                .filter(d -> d.used < avg * 0.8).collect(Collectors.toList());
 
-        // datacenter_information.csv
-        l.clear();
-        l.add("DatacenterID,Region,TypeDC,StorageCapacityMB,StorageUsedMB,StorageFreeMB,HostCount,CostPerCloudlet,VMPerHost");
-        for (DC dc : dcList)
-            l.add(String.format(Locale.US, "%d,%s,%s,%d,%d,%d,%d,%.4f,%d",
-                dc.id, dc.region, dc.type, dc.capacite, dc.utilise, dc.libre,
-                dc.hosts, dc.cout, VMS_PER_HOST));
-        ecrireCSV(dir + "datacenter_information.csv", l);
-
-        // user_access_details.csv
-        l.clear();
-        l.add("UserID,UserLocation,FileID,AccessType,PreferredDatacenter,Region");
-        for (Utilisateur u : users)
-            for (Map.Entry<Integer,AT> e : u.access.entrySet()) {
-                int dcId = u.fileToDc.getOrDefault(e.getKey(), 1);
-                l.add(String.format("%d,%s,%d,%s,%d,%s",
-                    u.id, u.location, e.getKey(), e.getValue(), dcId,
-                    dcRegion.getOrDefault(dcId, "?")));
+            int moved = 0;
+            for (ReplicaData file : fichiers) {
+                if (moved >= 50) break;
+                for (RegionInfo o : over) {
+                    if (!file.datacenterIds.contains(o.datacenterId)) continue;
+                    for (RegionInfo u : under) {
+                        if (!file.datacenterIds.contains(u.datacenterId)
+                                && u.storageLibre >= file.sizeMB) {
+                            file.datacenterIds.remove(Integer.valueOf(o.datacenterId));
+                            file.datacenterIds.add(u.datacenterId);
+                            o.storageLibre += file.sizeMB; o.used -= file.sizeMB;
+                            u.storageLibre -= file.sizeMB; u.used += file.sizeMB;
+                            moved++;
+                            break;
+                        }
+                    }
+                    if (moved > 0) break;
+                }
             }
-        ecrireCSV(dir + "user_access_details.csv", l);
-
-        // Signal pour Python
-        Files.write(Paths.get(dir + "data_ready.signal"),
-            (driftId + ":" + System.currentTimeMillis()).getBytes(),
-            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+            System.out.printf("    [NSGA-II fallback] %d répliques déplacées%n", moved);
+            return fichiers;
+        }
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  ÉCRITURE DES 3 CSV (datacenter / fichiers / utilisateurs)
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    // GÉNÉRATION DES 3 FICHIERS CSV
+    // ══════════════════════════════════════════════════════════════════════════
 
-    /** CSV datacenter_information.csv */
-    private static void ecrireDcCsv(String path, List<DC> dcs) throws IOException {
-        List<String> l = new ArrayList<>();
-        l.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB,StorageUsedMB,StorageFreeMB,UsagePct,VMCount");
-        for (DC dc : dcs)
-            l.add(String.format(Locale.US, "%d,%s,%s,%d,%d,%d,%d,%.2f%%,%d",
-                dc.id, dc.region, dc.type, dc.hosts,
-                dc.capacite, dc.utilise, dc.libre,
-                100.0 * dc.utilise / Math.max(1, dc.capacite), dc.nbVms));
-        ecrireCSV(path, l);
-    }
+    /**
+     * Génère les 3 CSV pour un état donné.
+     * @param prefixe  ex: "drift0001_avant" ou "drift0001_apres_nsga2"
+     * @param dossier  chemin du sous-dossier (créé si absent)
+     */
+    private static void generer3CSV(
+            String prefixe, String dossier,
+            List<RegionInfo>     dcInfos,
+            List<ReplicaData>    fichiers,
+            List<User>           users,
+            Map<Integer, String> dcidToRegion) throws IOException {
 
-    /** CSV file_information.csv */
-    private static void ecrireFichiersCsv(String path, List<Fichier> fichiers,
-            Map<Integer, String> dcRegion) throws IOException {
-        List<String> l = new ArrayList<>();
-        l.add("FileID,SizeMB,Importance,ReplicaCount,ReplicaLocations," +
-              "NbUsersAcces,NbRead,NbWrite,NbReadWrite");
-        for (Fichier f : fichiers) {
-            long r  = f.userAccess.values().stream().filter(a->a==AT.READ).count();
-            long w  = f.userAccess.values().stream().filter(a->a==AT.WRITE).count();
-            long rw = f.userAccess.values().stream().filter(a->a==AT.READ_WRITE).count();
-            String locs = f.dcs.stream()
-                .map(d -> d + "(" + dcRegion.getOrDefault(d,"?") + ")")
+        Files.createDirectories(Paths.get(dossier));
+
+        // ── 1. datacenter_information.csv ────────────────────────────────────
+        String pDC = dossier + prefixe + "_datacenter_information.csv";
+        List<String> lDC = new ArrayList<>();
+        lDC.add("DatacenterID,Region,TypeDC,HostCount,StorageCapacityMB," +
+                "StorageUsedMB,StorageFreeMB,UsagePercentage,VMCount,VMPerHost,CostPerGB");
+        for (RegionInfo r : dcInfos) {
+            double pct = (double) r.used / r.storageCapacity * 100;
+            lDC.add(String.format(Locale.US,
+                "%d,%s,%s,%d,%d,%d,%d,%.2f%%,%d,%d,%.4f",
+                r.datacenterId, r.region, r.typeDc, r.hostCount,
+                r.storageCapacity, r.used, r.storageLibre, pct,
+                r.vmCount, VMS_PER_HOST, r.costPerCloudlet * 10));
+        }
+        Files.write(Paths.get(pDC), lDC, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        System.out.println("  ✓ " + Paths.get(pDC).getFileName());
+
+        // ── 2. file_information.csv ───────────────────────────────────────────
+        String pFile = dossier + prefixe + "_file_information.csv";
+        List<String> lFile = new ArrayList<>();
+        lFile.add("FileID,SizeMB,Importance,ReplicaCount,ReplicaLocations," +
+                  "UserAccessCount,ReadCount,WriteCount,ReadWriteCount");
+        for (ReplicaData f : fichiers) {
+            String locs = f.datacenterIds.stream()
+                .map(d -> d + "(" + dcidToRegion.getOrDefault(d, "?") + ")")
                 .collect(Collectors.joining("; "));
-            l.add(String.format(Locale.US, "%d,%d,%d,%d,%s,%d,%d,%d,%d",
-                f.id, f.sizeMB, f.importance, f.dcs.size(), locs,
-                f.userAccess.size(), r, w, rw));
-        }
-        ecrireCSV(path, l);
-    }
-
-    /** CSV user_access_details.csv */
-    private static void ecrireUsersCsv(String path, List<Utilisateur> users,
-            Map<Integer, String> dcRegion) throws IOException {
-        List<String> l = new ArrayList<>();
-        l.add("UserID,UserLocation,FileID,AccessType,DatacenterAcceded,Region");
-        for (Utilisateur u : users)
-            for (Map.Entry<Integer,AT> e : u.access.entrySet()) {
-                int dcId = u.fileToDc.getOrDefault(e.getKey(), 1);
-                l.add(String.format("%d,%s,%d,%s,%d,%s",
-                    u.id, u.location, e.getKey(), e.getValue(), dcId,
-                    dcRegion.getOrDefault(dcId, "?")));
+            int r = 0, w = 0, rw = 0;
+            for (AccessType a : f.userAccess.values()) {
+                if (a == AccessType.READ) r++;
+                else if (a == AccessType.WRITE) w++;
+                else rw++;
             }
-        ecrireCSV(path, l);
+            lFile.add(String.format(Locale.US, "%d,%d,%d,%d,%s,%d,%d,%d,%d",
+                f.dataID, f.sizeMB, f.importance, f.datacenterIds.size(),
+                locs, f.userAccess.size(), r, w, rw));
+        }
+        Files.write(Paths.get(pFile), lFile, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        System.out.println("  ✓ " + Paths.get(pFile).getFileName());
+
+        // ── 3. useraccess_details.csv ─────────────────────────────────────────
+        String pUser = dossier + prefixe + "_useraccess_details.csv";
+        List<String> lUser = new ArrayList<>();
+        lUser.add("UserID,UserLocation,FileID,AccessType,DatacenterAccessed,DatacenterRegion");
+        for (User u : users) {
+            for (Map.Entry<Integer, AccessType> e : u.fileAccess.entrySet()) {
+                int fid  = e.getKey();
+                int dcId = u.fileToDatacenter.getOrDefault(fid, -1);
+                lUser.add(String.format("%d,%s,%d,%s,%d,%s",
+                    u.id, u.location, fid, e.getValue(),
+                    dcId, dcidToRegion.getOrDefault(dcId, "Unknown")));
+            }
+        }
+        Files.write(Paths.get(pUser), lUser, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        System.out.println("  ✓ " + Paths.get(pUser).getFileName());
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  DRIFTS
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    // DRIFTS
+    // ══════════════════════════════════════════════════════════════════════════
 
-    private static void applyDriftTailles(List<Fichier> fichiers, Random rng, Map<Integer,DC> dcMap) {
+    private static void applyFileSizeDrift(List<ReplicaData> fichiers, Random rng,
+                                           Map<Integer, RegionInfo> dcMap,
+                                           Map<Integer, Integer> origSizes) {
         int mod = 0;
-        for (Fichier f : fichiers) {
-            if (rng.nextDouble() >= 0.3) continue;
-            int old = f.sizeMB;
-            int nw  = Math.max(500, Math.min(20_000, (int)(old * (0.5 + rng.nextDouble()))));
-            int delta = nw - old;
-            if (delta > 0) {
-                int avail = f.dcs.stream().mapToInt(d -> dcMap.get(d).libre).sum();
-                if (avail < delta) continue;
-                int rem = delta;
-                for (int dcId : f.dcs) {
-                    DC dc = dcMap.get(dcId);
-                    int add = Math.min(rem, dc.libre);
-                    dc.libre -= add; dc.utilise += add; rem -= add;
-                    if (rem == 0) break;
-                }
-            } else {
-                int toFree = -delta;
-                for (int dcId : f.dcs) {
-                    DC dc = dcMap.get(dcId);
-                    int fr = Math.min(toFree, dc.utilise);
-                    dc.libre += fr; dc.utilise -= fr; toFree -= fr;
-                    if (toFree == 0) break;
-                }
-            }
-            f.sizeMB = nw; mod++;
-        }
-        System.out.printf("  Drift tailles : %d fichiers modifiés%n", mod);
-    }
-
-    private static void applyDriftAcces(List<Fichier> fichiers, List<Utilisateur> users,
-            Random rng, Map<Integer,String> dcRegion) {
-        Map<Integer,Fichier> fMap = new HashMap<>();
-        for (Fichier f : fichiers) fMap.put(f.id, f);
-        int added=0, removed=0, changed=0;
-        for (Utilisateur u : users) {
-            if (rng.nextDouble() >= 0.4) continue;
-            List<Integer> cur = new ArrayList<>(u.access.keySet());
-            // Suppressions
-            int toRem = Math.min(cur.size(), 1 + rng.nextInt(3));
-            for (int i = 0; i < toRem && !cur.isEmpty(); i++) {
-                int fid = cur.remove(rng.nextInt(cur.size()));
-                u.access.remove(fid); u.fileToDc.remove(fid);
-                Fichier f = fMap.get(fid);
-                if (f != null) f.userAccess.remove(u.id);
-                removed++;
-            }
-            // Ajouts
-            for (int i = 0; i < 1 + rng.nextInt(3); i++) {
-                Fichier f = fichiers.get(rng.nextInt(fichiers.size()));
-                if (!u.access.containsKey(f.id)) {
-                    AT a = rndAT(rng);
-                    int dcId = meilleurDc(f, u.location, dcRegion);
-                    u.addAccess(f.id, a, dcId);
-                    f.addUser(u.id, a, dcId);
-                    added++;
-                }
-            }
-            // Modifications
-            List<Integer> rem2 = new ArrayList<>(u.access.keySet());
-            int toMod = Math.min(rem2.size(), 1 + rng.nextInt(2));
-            for (int i = 0; i < toMod && !rem2.isEmpty(); i++) {
-                int fid = rem2.get(rng.nextInt(rem2.size()));
-                AT na = rndAT(rng);
-                if (u.access.get(fid) != na) {
-                    u.access.put(fid, na);
-                    Fichier f = fMap.get(fid);
-                    if (f != null) f.userAccess.put(u.id, na);
-                    changed++;
-                }
-            }
-        }
-        System.out.printf("  Drift accès : +%d -%d ~%d%n", added, removed, changed);
-    }
-
-    // ══════════════════════════════════════════════════════════════
-    //  OPTIMISATION
-    // ══════════════════════════════════════════════════════════════
-
-    private static void appliquerOptimisation(List<Fichier> fichiers, Map<Integer,DC> dcMap) {
-        int count = 0;
-        for (Fichier f : fichiers) {
-            // SPEA2 : ajuster nombre de répliques
-            if (pyReplicas.containsKey(f.id)) {
-                int target = pyReplicas.get(f.id);
-                for (DC dc : dcMap.values()) {
-                    if (f.dcs.size() >= target) break;
-                    if (!f.dcs.contains(dc.id) && dc.libre >= f.sizeMB) {
-                        f.dcs.add(dc.id);
-                        dc.libre -= f.sizeMB; dc.utilise += f.sizeMB;
-                        count++;
+        for (ReplicaData f : fichiers) {
+            if (rng.nextDouble() < 0.3) {
+                int old = f.sizeMB;
+                origSizes.put(f.dataID, old);
+                int nw = Math.max(500, Math.min(20000, (int)(old * (0.5 + rng.nextDouble()))));
+                int diff = nw - old;
+                if (diff > 0) {
+                    int avail = f.datacenterIds.stream()
+                        .mapToInt(d -> dcMap.get(d).storageLibre).sum();
+                    if (avail >= diff) {
+                        int rem = diff;
+                        for (int d : f.datacenterIds) {
+                            RegionInfo dc = dcMap.get(d);
+                            int add = Math.min(rem, dc.storageLibre);
+                            dc.storageLibre -= add; dc.used += add; rem -= add;
+                            if (rem == 0) break;
+                        }
+                        f.updateSize(nw); mod++;
                     }
-                }
-            }
-            // NSGA-II : déplacer répliques
-            if (pyPlacements.containsKey(f.id)) {
-                List<Integer> nDcs = pyPlacements.get(f.id);
-                boolean ok = nDcs.stream().allMatch(did -> {
-                    DC dc = dcMap.get(did); return dc != null && dc.libre >= f.sizeMB;
-                });
-                if (ok && !nDcs.isEmpty()) {
-                    for (int old : f.dcs) {
-                        DC dc = dcMap.get(old);
-                        if (dc != null) { dc.libre += f.sizeMB; dc.utilise -= f.sizeMB; }
+                } else if (diff < 0) {
+                    for (int d : f.datacenterIds) {
+                        RegionInfo dc = dcMap.get(d);
+                        int rel = Math.min(-diff, dc.used);
+                        dc.storageLibre += rel; dc.used -= rel;
                     }
-                    f.dcs = new ArrayList<>(nDcs);
-                    for (int nid : nDcs) {
-                        DC dc = dcMap.get(nid);
-                        if (dc != null) { dc.libre -= f.sizeMB; dc.utilise += f.sizeMB; }
-                    }
-                    count++;
+                    f.updateSize(nw); mod++;
                 }
             }
         }
-        System.out.printf("  Optimisation SPEA2+NSGA2 : %d fichiers%n", count);
+        System.out.printf("  Drift taille : %d fichiers modifiés%n", mod);
     }
 
-    private static void appliquerDefaut(List<Fichier> fichiers, Map<Integer,DC> dcMap,
-            Map<Integer,String> dcRegion, Random rng) {
-        int seuil = Math.max(1, fichiers.size() * 30 / 100);
-        List<Fichier> tries = fichiers.stream()
-            .sorted(Comparator.comparingInt(f -> -f.userAccess.size()))
-            .limit(seuil).collect(Collectors.toList());
-        int count = 0;
-        for (Fichier f : tries) {
-            Map<String,Long> regionCount = f.userToDc.values().stream()
-                .collect(Collectors.groupingBy(d -> dcRegion.getOrDefault(d,"?"), Collectors.counting()));
-            String target = regionCount.entrySet().stream()
-                .filter(e -> f.dcs.stream().noneMatch(d -> dcRegion.get(d).equals(e.getKey())))
-                .max(Map.Entry.comparingByValue()).map(Map.Entry::getKey).orElse(null);
-            if (target == null) continue;
-            final String tr = target;
-            List<DC> cands = dcMap.values().stream()
-                .filter(dc -> dc.region.equals(tr) && dc.libre >= f.sizeMB && !f.dcs.contains(dc.id))
-                .collect(Collectors.toList());
-            if (!cands.isEmpty()) {
-                DC chosen = cands.get(rng.nextInt(cands.size()));
-                f.dcs.add(chosen.id);
-                chosen.libre -= f.sizeMB; chosen.utilise += f.sizeMB;
-                count++;
-            }
-        }
-        System.out.printf("  Réplication défaut : %d fichiers%n", count);
-    }
+    private static void applyUserAccessDrift(List<User> users, List<ReplicaData> fichiers,
+                                             Random rng, Map<Integer, String> dcidToRegion,
+                                             Map<Integer, Map<Integer, AccessType>> origAccess) {
+        for (User u : users)
+            origAccess.put(u.id, new HashMap<>(u.fileAccess));
 
-    // ══════════════════════════════════════════════════════════════
-    //  INIT ACCÈS
-    // ══════════════════════════════════════════════════════════════
-
-    private static void initAccess(List<Fichier> fichiers, List<Utilisateur> users,
-            Map<Integer,String> dcRegion, Random rng) {
-        for (Utilisateur u : users) {
-            int n = 1 + rng.nextInt(5);
-            for (int i = 0; i < n; i++) {
-                Fichier f = fichiers.get(rng.nextInt(fichiers.size()));
-                if (!u.access.containsKey(f.id)) {
-                    AT a = rndAT(rng);
-                    int dcId = meilleurDc(f, u.location, dcRegion);
-                    u.addAccess(f.id, a, dcId); f.addUser(u.id, a, dcId);
+        int add = 0, del = 0;
+        for (User user : users) {
+            if (rng.nextDouble() < 0.4) {
+                List<Integer> cur = new ArrayList<>(user.fileAccess.keySet());
+                int toDel = Math.min(cur.size(), 1 + rng.nextInt(3));
+                for (int i = 0; i < toDel && !cur.isEmpty(); i++) {
+                    int fid = cur.get(rng.nextInt(cur.size()));
+                    user.fileAccess.remove(fid);
+                    user.fileToDatacenter.remove(fid);
+                    fichiers.stream().filter(f -> f.dataID == fid).findFirst()
+                            .ifPresent(f -> f.userAccess.remove(user.id));
+                    cur.remove(Integer.valueOf(fid));
+                    del++;
                 }
-            }
-        }
-        for (Fichier f : fichiers) {
-            if (f.userAccess.size() < 10) {
-                for (int i = 0; i < 30 + rng.nextInt(20); i++) {
-                    Utilisateur u = users.get(rng.nextInt(users.size()));
-                    if (!f.userAccess.containsKey(u.id)) {
-                        AT a = rndAT(rng); int dcId = meilleurDc(f, u.location, dcRegion);
-                        u.addAccess(f.id, a, dcId); f.addUser(u.id, a, dcId);
+                int toAdd = 1 + rng.nextInt(3);
+                for (int i = 0; i < toAdd; i++) {
+                    ReplicaData file = fichiers.get(rng.nextInt(fichiers.size()));
+                    if (!user.fileAccess.containsKey(file.dataID)) {
+                        AccessType acc = getRandomAcc(rng);
+                        String best = BEST_DC_MAP.getOrDefault(user.location, "Europe");
+                        int dc = file.datacenterIds.stream()
+                            .filter(d -> best.equals(dcidToRegion.get(d)))
+                            .findFirst().orElse(file.datacenterIds.get(0));
+                        user.addFileAccess(file.dataID, acc, dc);
+                        file.addUserAccess(user.id, acc, dc);
+                        add++;
                     }
                 }
             }
         }
+        System.out.printf("  Drift accès : +%d / -%d%n", add, del);
     }
 
-    // ══════════════════════════════════════════════════════════════
-    //  UTILITAIRES
-    // ══════════════════════════════════════════════════════════════
+    // ══════════════════════════════════════════════════════════════════════════
+    // COPIES PROFONDES (SPEA2 et NSGA-II travaillent sur des copies indépendantes)
+    // ══════════════════════════════════════════════════════════════════════════
 
-    private static Datacenter createCloudSimDC(String name, int hosts, double cost) throws Exception {
-        List<Host> hostList = new ArrayList<>();
-        for (int i = 0; i < hosts; i++) {
-            List<Pe> pes = new ArrayList<>();
-            pes.add(new Pe(0, new PeProvisionerSimple(VM_MIPS)));
-            hostList.add(new Host(i,
-                new RamProvisionerSimple(VM_RAM * VMS_PER_HOST),
-                new BwProvisionerSimple(VM_BW * VMS_PER_HOST),
-                VM_SIZE * VMS_PER_HOST, pes, new VmSchedulerTimeShared(pes)));
+    private static List<ReplicaData> deepCopyFichiers(List<ReplicaData> src) {
+        List<ReplicaData> out = new ArrayList<>();
+        for (ReplicaData f : src) {
+            ReplicaData c = new ReplicaData(f.dataID, f.sizeMB, f.importance,
+                                            f.popularite, new ArrayList<>(f.datacenterIds));
+            c.userAccess.putAll(f.userAccess);
+            c.userToDatacenter.putAll(f.userToDatacenter);
+            c.accessCountByDc.putAll(f.accessCountByDc);
+            out.add(c);
         }
-        DatacenterCharacteristics dc = new DatacenterCharacteristics(
-            "x86","Linux","Xen", hostList, 10.0, cost, 0.05, 0.001, 0.001);
-        return new Datacenter(name, dc, new VmAllocationPolicySimple(hostList),
-            new LinkedList<>(), 0);
+        return out;
     }
 
-    private static void ecrireCSV(String path, List<String> lines) throws IOException {
-        Path p = Paths.get(path);
-        Files.createDirectories(p.getParent());
-        Files.write(p, lines, StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-    }
-
-    private static int meilleurDc(Fichier f, String loc, Map<Integer,String> dcRegion) {
-        String reg = BEST_DC_MAP.getOrDefault(loc, "Europe");
-        return f.dcs.stream().filter(d -> reg.equals(dcRegion.get(d)))
-            .findFirst().orElse(f.dcs.get(0));
-    }
-
-    private static AT rndAT(Random r) {
-        switch (r.nextInt(3)) { case 0: return AT.READ; case 1: return AT.WRITE;
-                                 default: return AT.READ_WRITE; }
-    }
-
-    private static int col(String[] h, String... cands) {
-        for (int i = 0; i < h.length; i++) {
-            String s = h[i].trim().toLowerCase().replaceAll("[^a-z0-9]","");
-            for (String c : cands) if (s.equals(c.toLowerCase().replaceAll("[^a-z0-9]",""))) return i;
+    private static List<RegionInfo> deepCopyDC(List<RegionInfo> src) {
+        List<RegionInfo> out = new ArrayList<>();
+        for (RegionInfo r : src) {
+            RegionInfo c = new RegionInfo(r.datacenterId, r.region, r.costPerCloudlet,
+                                          r.typeDc, r.hostCount, r.storageCapacity);
+            c.storageLibre = r.storageLibre;
+            c.used         = r.used;
+            out.add(c);
         }
-        return -1;
+        return out;
     }
 
-    private static Map<String,String> buildBestDcMap() {
-        Map<String,String> m = new HashMap<>();
-        m.put("Paris (France)","Europe");      m.put("Berlin (Allemagne)","Europe");
-        m.put("Madrid (Espagne)","Europe");    m.put("New York (USA)","USA");
-        m.put("San Francisco (USA)","USA");    m.put("Tokyo (Japon)","Asie");
-        m.put("Mumbai (Inde)","Asie");         m.put("Nairobi (Kenya)","Afrique");
-        m.put("Lagos (Nigeria)","Afrique");    m.put("Le Caire (Egypte)","Afrique");
+    private static Map<Integer, RegionInfo> dcListToMap(List<RegionInfo> list) {
+        Map<Integer, RegionInfo> m = new HashMap<>();
+        for (RegionInfo r : list) m.put(r.datacenterId, r);
         return m;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // UTILITAIRES
+    // ══════════════════════════════════════════════════════════════════════════
+
+    private static AccessType getRandomAcc(Random r) {
+        int v = r.nextInt(3);
+        return v == 0 ? AccessType.READ : (v == 1 ? AccessType.WRITE : AccessType.READ_WRITE);
+    }
+
+    private static String regionForDC(int dcId) {
+        if (dcId >=  1 && dcId <=  6) return "Europe";
+        if (dcId >=  7 && dcId <= 12) return "USA";
+        if (dcId >= 13 && dcId <= 18) return "Asie";
+        if (dcId >= 19 && dcId <= 24) return "Afrique";
+        if (dcId >= 25 && dcId <= 30) return "AmeriqueSud";
+        return "Unknown";
+    }
+
+    private static Map<String, String> createBestDcMap() {
+        Map<String, String> m = new HashMap<>();
+        m.put("Paris (France)", "Europe");   m.put("Berlin (Allemagne)", "Europe");
+        m.put("Madrid (Espagne)", "Europe"); m.put("New York (USA)", "USA");
+        m.put("San Francisco (USA)", "USA"); m.put("Tokyo (Japon)", "Asie");
+        m.put("Mumbai (Inde)", "Asie");      m.put("Nairobi (Kenya)", "Afrique");
+        m.put("Lagos (Nigeria)", "Afrique"); m.put("Le Caire (Egypte)", "Afrique");
+        return m;
+    }
+
+    private static void distributeAccess(List<ReplicaData> fichiers, List<User> users,
+                                         Map<Integer, String> dcidToRegion,
+                                         Map<Integer, RegionInfo> dcMap, Random rng) {
+        for (User u : users) {
+            for (int i = 0; i < 1 + rng.nextInt(5); i++) {
+                ReplicaData f = fichiers.get(rng.nextInt(fichiers.size()));
+                if (!u.fileAccess.containsKey(f.dataID)) {
+                    AccessType acc = getRandomAcc(rng);
+                    String best = BEST_DC_MAP.getOrDefault(u.location, "Europe");
+                    int dc = f.datacenterIds.stream()
+                        .filter(d -> best.equals(dcidToRegion.get(d)))
+                        .findFirst().orElse(f.datacenterIds.get(0));
+                    u.addFileAccess(f.dataID, acc, dc);
+                    f.addUserAccess(u.id, acc, dc);
+                }
+            }
+        }
+        // Garantir ≥ 30 accès par fichier
+        for (ReplicaData f : fichiers) {
+            int iter = 0;
+            while (f.userAccess.size() < 30 && iter++ < 10000) {
+                User u = users.get(rng.nextInt(users.size()));
+                if (!f.userAccess.containsKey(u.id)) {
+                    AccessType acc = getRandomAcc(rng);
+                    String best = BEST_DC_MAP.getOrDefault(u.location, "Europe");
+                    int dc = f.datacenterIds.stream()
+                        .filter(d -> best.equals(dcidToRegion.get(d)))
+                        .findFirst().orElse(f.datacenterIds.get(0));
+                    u.addFileAccess(f.dataID, acc, dc);
+                    f.addUserAccess(u.id, acc, dc);
+                }
+            }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // MAIN
+    // ══════════════════════════════════════════════════════════════════════════
+
+    public static void main(String[] args) {
+        try {
+            Files.createDirectories(Paths.get(CSV_OUTPUT_DIR));
+            System.out.println("=========================================");
+            System.out.println("  SIMULATION — " + N_DRIFTS + " DRIFTS");
+            System.out.println("  SPEA2 + NSGA-II | 30 DC | 500 fichiers");
+            System.out.println("=========================================");
+            System.out.println("Démarrage : " + new Date());
+            System.out.println("Dossier   : " + CSV_OUTPUT_DIR + "\n");
+
+            Random rng = new Random(RANDOM_SEED);
+            CloudSim.init(1, Calendar.getInstance(), false);
+
+            // ── Configuration des 30 datacenters ──────────────────────────────
+            String[] REGIONS = {
+                "Europe","Europe","Europe","Europe","Europe","Europe",
+                "USA","USA","USA","USA","USA","USA",
+                "Asie","Asie","Asie","Asie","Asie","Asie",
+                "Afrique","Afrique","Afrique","Afrique","Afrique","Afrique",
+                "AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud","AmeriqueSud"};
+            String[] TYPES = {
+                "grand","grand","moyen","moyen","mini","mini",
+                "grand","grand","grand","moyen","moyen","mini",
+                "grand","grand","moyen","moyen","mini","mini",
+                "grand","moyen","moyen","mini","mini","mini",
+                "grand","moyen","moyen","mini","mini","mini"};
+            double[] COSTS = {
+                0.06,0.06,0.06,0.06,0.06,0.06,
+                0.05,0.05,0.05,0.05,0.05,0.05,
+                0.045,0.045,0.045,0.045,0.045,0.045,
+                0.035,0.035,0.035,0.035,0.035,0.035,
+                0.04,0.04,0.04,0.04,0.04,0.04};
+
+            List<RegionInfo>         dcInfosInit = new ArrayList<>();
+            Map<Integer, String>     dcidToRegion = new HashMap<>();
+
+            for (int i = 1; i <= 30; i++) {
+                int hosts   = TYPES[i-1].equals("grand") ? 100 : TYPES[i-1].equals("moyen") ? 60 : 30;
+                int storage = hosts * 100_000;
+                RegionInfo ri = new RegionInfo(i, REGIONS[i-1], COSTS[i-1], TYPES[i-1], hosts, storage);
+                dcInfosInit.add(ri);
+                dcidToRegion.put(i, REGIONS[i-1]);
+            }
+
+            // ── 500 fichiers ───────────────────────────────────────────────────
+            int[] SIZES = {1500, 2500, 5000, 7500, 10000};
+            List<ReplicaData> fichiersInit = new ArrayList<>();
+            for (int i = 1; i <= 500; i++) {
+                int dc1 = ((i-1) % 30) + 1;
+                int dc2 = ((i-1) + 15) % 30 + 1;
+                fichiersInit.add(new ReplicaData(i, SIZES[(i-1)%5], (i-1)%5+1, 0,
+                    new ArrayList<>(Arrays.asList(dc1, dc2))));
+            }
+            // Mise à jour stockage DC
+            Map<Integer, RegionInfo> dcMapInit = dcListToMap(dcInfosInit);
+            for (ReplicaData f : fichiersInit)
+                for (int d : f.datacenterIds) {
+                    dcMapInit.get(d).used        += f.sizeMB;
+                    dcMapInit.get(d).storageLibre -= f.sizeMB;
+                }
+
+            // ── 1000 utilisateurs ──────────────────────────────────────────────
+            String[] LOCS  = {"Paris (France)","Berlin (Allemagne)","Madrid (Espagne)",
+                               "New York (USA)","San Francisco (USA)","Tokyo (Japon)",
+                               "Mumbai (Inde)","Nairobi (Kenya)","Lagos (Nigeria)","Le Caire (Egypte)"};
+            int[]    CNTS  = {80,160,100,120,80,100,120,60,100,80};
+            List<User> usersInit = new ArrayList<>();
+            int uid = 1;
+            for (int i = 0; i < LOCS.length; i++)
+                for (int j = 0; j < CNTS[i]; j++)
+                    usersInit.add(new User(uid++, LOCS[i]));
+
+            distributeAccess(fichiersInit, usersInit, dcidToRegion, dcMapInit, rng);
+            System.out.printf("Init : %d DC | %d fichiers | %d users%n%n",
+                dcInfosInit.size(), fichiersInit.size(), usersInit.size());
+
+            // ── Charger les optimiseurs ────────────────────────────────────────
+            // TODO : Remplacez les fallbacks par vos vraies classes :
+            //   ReplicaOptimizer spea2 = new SPEA2Optimizer();
+            //   ReplicaOptimizer nsga2 = new NSGA2Optimizer();
+            ReplicaOptimizer spea2 = new SPEA2FallbackOptimizer();
+            ReplicaOptimizer nsga2 = new NSGA2FallbackOptimizer();
+
+            // ── État courant (évolue drift par drift) ─────────────────────────
+            List<ReplicaData> curFichiers = deepCopyFichiers(fichiersInit);
+            List<RegionInfo>  curDCInfos  = deepCopyDC(dcInfosInit);
+            List<User>        curUsers    = usersInit;  // partagé (drift modifie en place)
+
+            // ══════════════════════════════════════════════════════════════════
+            // BOUCLE PRINCIPALE : N_DRIFTS drifts
+            // ══════════════════════════════════════════════════════════════════
+            System.out.println("--- DÉBUT DES DRIFTS ---");
+            int ok = 0;
+
+            for (int driftId = 1; driftId <= N_DRIFTS; driftId++) {
+                System.out.printf("%n══════════════════════════════════════%n");
+                System.out.printf("  DRIFT %3d / %d%n", driftId, N_DRIFTS);
+                System.out.printf("══════════════════════════════════════%n");
+
+                String dossier = CSV_OUTPUT_DIR
+                    + String.format("drift_%04d", driftId)
+                    + File.separator;
+                Files.createDirectories(Paths.get(dossier));
+
+                String pref = String.format("drift%04d", driftId);
+                Map<Integer, RegionInfo> curDCMap = dcListToMap(curDCInfos);
+
+                try {
+                    // ── [A] 3 CSV AVANT drift i ───────────────────────────────
+                    System.out.println("\n[A] 3 CSV avant drift " + driftId);
+                    generer3CSV(pref + "_avant", dossier,
+                                curDCInfos, curFichiers, curUsers, dcidToRegion);
+
+                    // ── [B] Application du drift ──────────────────────────────
+                    System.out.println("\n[B] Application drift " + driftId);
+                    Map<Integer, Integer>                  origSizes  = new HashMap<>();
+                    Map<Integer, Map<Integer, AccessType>> origAccess = new HashMap<>();
+                    applyFileSizeDrift(curFichiers, new Random(RANDOM_SEED + driftId),
+                                       curDCMap, origSizes);
+                    applyUserAccessDrift(curUsers, curFichiers,
+                                         new Random(RANDOM_SEED + driftId + 1000),
+                                         dcidToRegion, origAccess);
+
+                    // ── [C] Optimisation SPEA2 ────────────────────────────────
+                    System.out.println("\n[C] Optimisation SPEA2");
+                    List<ReplicaData> fiS = deepCopyFichiers(curFichiers);
+                    List<RegionInfo>  dcS = deepCopyDC(curDCInfos);
+                    fiS = spea2.optimize(fiS, dcListToMap(dcS), dcidToRegion,
+                                         curUsers, new Random(RANDOM_SEED + driftId));
+
+                    System.out.println("  → 3 CSV après SPEA2");
+                    generer3CSV(pref + "_apres_spea2", dossier,
+                                dcS, fiS, curUsers, dcidToRegion);
+
+                    // ── [D] Optimisation NSGA-II ──────────────────────────────
+                    System.out.println("\n[D] Optimisation NSGA-II");
+                    List<ReplicaData> fiN = deepCopyFichiers(curFichiers);
+                    List<RegionInfo>  dcN = deepCopyDC(curDCInfos);
+                    fiN = nsga2.optimize(fiN, dcListToMap(dcN), dcidToRegion,
+                                         curUsers, new Random(RANDOM_SEED + driftId + 2000));
+
+                    // ── [E] 3 CSV APRÈS optimisation → entrée CloudSim drift i+1
+                    System.out.println("\n[E] 3 CSV après optimisation (CloudSim drift " + (driftId+1) + ")");
+                    generer3CSV(pref + "_apres_optim_cloudsim", dossier,
+                                dcN, fiN, curUsers, dcidToRegion);
+
+                    // ── [F] Mettre à jour l'état pour le drift suivant ─────────
+                    curFichiers = fiN;
+                    curDCInfos  = dcN;
+                    // curUsers a été modifié en place par applyUserAccessDrift
+
+                    ok++;
+                    System.out.printf("  ✅ Drift %d OK%n", driftId);
+
+                } catch (Exception e) {
+                    System.err.printf("  ❌ Drift %d échoué : %s%n", driftId, e.getMessage());
+                    e.printStackTrace();
+                }
+            }
+
+            // ── Résumé final ───────────────────────────────────────────────────
+            String summaryPath = CSV_OUTPUT_DIR + "simulation_summary.csv";
+            List<String> summary = new ArrayList<>();
+            summary.add("SimulationDate," + new Date());
+            summary.add("TotalDrifts," + N_DRIFTS);
+            summary.add("DriftsOK," + ok);
+            summary.add("TotalFiles," + curFichiers.size());
+            summary.add("TotalUsers," + curUsers.size());
+            summary.add("TotalDatacenters," + curDCInfos.size());
+            summary.add("FinalTotalReplicas,"
+                + curFichiers.stream().mapToInt(f -> f.datacenterIds.size()).sum());
+            Files.write(Paths.get(summaryPath), summary, StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+
+            System.out.println("\n=========================================");
+            System.out.printf("✅ TERMINÉ — %d/%d drifts réussis%n", ok, N_DRIFTS);
+            System.out.println("   Résultats : " + CSV_OUTPUT_DIR);
+            System.out.println("=========================================");
+
+            CloudSim.stopSimulation();
+
+        } catch (Exception e) {
+            System.err.println("❌ ERREUR FATALE : " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 }
